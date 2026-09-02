@@ -364,6 +364,26 @@ export SPIRV_TOOLS_VERSION="2026.3"
 # reproducibilidad que el resto de este proyecto.
 export SPIRV_LLVM_TRANSLATOR_COMMIT="c808623558686b7b285cabfa71542a93a5390f55" # HEAD de llvm_release_230 al momento de este research (2026-09-02)
 
+# --- Fase 6 Parte 2 (cont.) — elfutils (libelf) --------------------------------
+# Agregado 2026-09-02, Décimo quinto error real: con LLVM+Clang y
+# SPIRV-LLVM-Translator ya completos en el sysroot, el "meson setup" de Mesa
+# frenó en "Gallium driver radeonsi requires libelf" -- el driver Gallium de
+# AMD (elegido para la RX 7700 del lab) usa libelf en su runtime linker de ELF
+# (src/amd/common, para relocar los binarios que produce el propio backend
+# AMDGPU de LLVM al compilar shaders). Ningún paso anterior del proyecto
+# compiló libelf para el target -- el "libelf-dev" del Dockerfile es del
+# compilador NATIVO del contenedor, no sirve para un build cruzado.
+#
+# VERIFICAR: sourceware.org devolvió 403 desde el sandbox de research (mismo
+# problema que ya tuvieron zlib.net/gitlab.fd.o con este proyecto -- ver
+# comentarios de ZLIB/LIBDRM/MESA más arriba), así que la versión se confirmó
+# indirecto, contra la portada real de sourceware.org/elfutils (que linkea
+# "0.191" como último release) en vez de por fetch directo del tarball -- pero
+# LVM2_MIRROR y BZIP2_MIRROR de este mismo archivo ya usan sourceware.org con
+# éxito en corridas reales de este proyecto, así que el dominio en sí no es
+# problema para el contenedor del usuario, sólo para este sandbox puntual.
+export ELFUTILS_VERSION="0.191"
+
 # --- Rutas --------------------------------------------------------------------
 export LFS="${LFS:-/lfs}"
 export LFS_SOURCES="${LFS}/sources"
@@ -594,6 +614,10 @@ export SPIRV_TOOLS_MIRROR="https://github.com/KhronosGroup/SPIRV-Tools/archive/r
 # SPIRV-Headers -- fijamos un commit puntual de la rama llvm_release_230, no
 # la rama en sí (que se mueve).
 export SPIRV_LLVM_TRANSLATOR_MIRROR="https://github.com/KhronosGroup/SPIRV-LLVM-Translator/archive"
+
+# elfutils: mismo tarball oficial que usan LFS/BLFS, "<version>/elfutils-<version>.tar.bz2"
+# dentro de esta base (ver VERIFICAR en el comentario de versión más arriba).
+export ELFUTILS_MIRROR="https://sourceware.org/elfutils/ftp"
 
 # --- Cargo (Fase 2, uutils) ----------------------------------------------------
 # CARGO_HOME por default es ~/.cargo (home del usuario "linsi" dentro del

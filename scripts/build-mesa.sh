@@ -156,6 +156,17 @@ extract_once() {
     touch "${marker}"
 }
 
+# build_triplet() -- agregado junto con step_elfutils() (Décimo quinto error
+# real): hasta ahora este archivo sólo tenía pasos Meson/CMake (libdrm, LLVM,
+# SPIRV-*, Mesa), ninguno usa "--build=" -- elfutils es el primer ./configure
+# de Autotools de build-mesa.sh, así que hace falta este helper, ya usado en
+# build-security.sh/build-desktop.sh/build-userspace.sh/build-comms.sh con
+# esta misma definición exacta (config.guess real de Binutils, no "uname -m"
+# a mano).
+build_triplet() {
+    "${LFS_BUILD}/binutils-${BINUTILS_VERSION}/config.guess"
+}
+
 # Cross file de Meson -- copia exacta del de build-desktop.sh (Fase 6 Parte 1),
 # ya con los dos fixes reales que costaron una ronda entera de debug ahí:
 # pkg_config_libdir como LISTA (share/pkgconfig además de lib/pkgconfig, lo
@@ -866,6 +877,102 @@ step_verify_spirv_llvm_translator() {
 }
 
 # ------------------------------------------------------------------------------
+# 7bis) elfutils (en la práctica, sólo libelf) — Autotools. Décimo quinto error
+# real (2026-09-02): con LLVM+Clang y SPIRV-LLVM-Translator ya completos en el
+# sysroot, el "meson setup" de Mesa avanzó y recién ahí frenó:
+#   Run-time dependency libelf found: NO (tried pkg-config and cmake)
+#   Library elf found: NO
+#   meson.build:2149:2: ERROR: Problem encountered: Gallium driver radeonsi requires libelf
+#
+# Causa raíz: el driver Gallium radeonsi (AMD, elegido para la RX 7700 real
+# del lab -- ver aviso al principio del archivo) usa libelf en su runtime
+# linker de ELF (src/amd/common/ac_rtld.c, para relocar en tiempo de
+# ejecución los binarios que el propio backend AMDGPU de LLVM produce al
+# compilar shaders) -- no es opcional para esa selección de drivers. Ningún
+# paso anterior de este proyecto compiló libelf para ${LFS_TGT}: el
+# "libelf-dev" que ya está en el Dockerfile es del compilador NATIVO del
+# contenedor (build machine), y esto es un build cruzado -- Mesa resuelve
+# dependencias contra ${LFS_SYSROOT}, no contra el sysroot del host.
+#
+# Se compila el paquete elfutils COMPLETO, no sólo el subdirectorio libelf/ a
+# mano: confirmado contra el Makefile.am real (rama principal del repo,
+# 2026-09-02) que SUBDIRS ahí es una lista fija sin ningún equivalente al
+# create_subdirectory_options() de LLVM/Clang (ver la lección grande del
+# Décimo quinto error de arriba, la de LLVM) -- no hay mecanismo oficial para
+# levantar sólo una parte, así que recortarlo a mano acá repetiría el mismo
+# error de fondo que ya costó dos rondas con LLVM. No hace falta preocuparse
+# por el costo: elfutils es chico, construir debuginfod/libdw/libasm/eu-* de
+# más son segundos, no las horas de LLVM.
+#
+# Tampoco se busca instalar/verificar un libelf.pc: confirmado contra
+# libelf/Makefile.am real que esta librería nunca generó uno (no hay
+# libelf.pc.in en el árbol) -- por eso el log de Mesa arriba prueba las DOS
+# rutas ("Run-time dependency" vía pkg-config/cmake, y por separado "Library
+# elf" vía cc.find_library) antes de rendirse; a nosotros nos alcanza con
+# que exista libelf.so instalado, que es lo que la segunda ruta encuentra.
+#
+# Flags de configure: --disable-nls (no hace falta i18n acá, evita depender
+# de que gettext/msgfmt generen catálogos .mo bien en cruzado);
+# --disable-libdebuginfod / --disable-debuginfod (el configure.ac real ya
+# los deja en "no" solo si no encuentra libcurl/json-c/libmicrohttpd/
+# libarchive/sqlite3 -- ninguno está en el sysroot -- pero se pasan
+# explícitos para no depender de ese autodescubrimiento). zlib (el único
+# requisito "mandatory" real de elfutils, confirmado contra configure.ac:
+# "zlib is mandatory") ya está en el sysroot desde build-comms.sh; bzip2/xz/
+# zstd quedan en su default "auto" y se autodesactivan solos -- no hacen
+# falta para libelf.
+# ------------------------------------------------------------------------------
+step_elfutils() {
+    require_toolchain
+    log "elfutils ${ELFUTILS_VERSION} para ${LFS_TGT} (libelf, lo necesita radeonsi de Mesa)"
+
+    cd "${LFS_SOURCES}"
+    fetch "${ELFUTILS_MIRROR}/${ELFUTILS_VERSION}/elfutils-${ELFUTILS_VERSION}.tar.bz2" \
+          "elfutils-${ELFUTILS_VERSION}.tar.bz2"
+    log_sha256 "${LFS_SOURCES}/elfutils-${ELFUTILS_VERSION}.tar.bz2"
+    extract_once "${LFS_SOURCES}/elfutils-${ELFUTILS_VERSION}.tar.bz2" \
+                 "${LFS_BUILD}/.extracted-elfutils"
+
+    local src="${LFS_BUILD}/elfutils-${ELFUTILS_VERSION}"
+    local bdir="${src}/build"
+    mkdir -p "${bdir}"
+    cd "${bdir}"
+
+    PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig" \
+    PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
+    ../configure \
+        --host="${LFS_TGT}" \
+        --build="$(build_triplet)" \
+        --prefix=/usr \
+        --program-prefix="eu-" \
+        --disable-nls \
+        --disable-libdebuginfod \
+        --disable-debuginfod
+
+    make ${MAKEFLAGS}
+    make DESTDIR="${LFS_SYSROOT}" install
+
+    log "elfutils (libelf) instalado en ${LFS_SYSROOT}/usr"
+}
+
+step_verify_elfutils() {
+    log "Verificación: libelf.so + libelf.h en el sysroot"
+    local ok=1
+    if [[ -e "${LFS_SYSROOT}/usr/include/libelf.h" ]]; then
+        echo "  [OK] ${LFS_SYSROOT}/usr/include/libelf.h"
+    else
+        echo "  [FALTA] ${LFS_SYSROOT}/usr/include/libelf.h"; ok=0
+    fi
+    if find "${LFS_SYSROOT}/usr/lib" -maxdepth 1 -name 'libelf.so*' 2>/dev/null | grep -q .; then
+        echo "  [OK] libelf.so presente"
+    else
+        echo "  [FALTA] libelf.so en ${LFS_SYSROOT}/usr/lib"; ok=0
+    fi
+    [[ "${ok}" -eq 1 ]] || die "falta elfutils/libelf en el sysroot"
+    log "OK: elfutils (libelf) completo en el sysroot."
+}
+
+# ------------------------------------------------------------------------------
 # 8) Mesa — Meson. Drivers elegidos para cubrir Intel/AMD/Nvidia reales del
 # lab (ver el aviso al principio del archivo). --native-file hace falta
 # porque Mesa también invoca wayland-scanner en tiempo de build (protocolo
@@ -906,6 +1013,9 @@ step_mesa() {
     fi
     if ! find "${LFS_SYSROOT}/usr/lib/pkgconfig" -maxdepth 1 -name 'LLVMSPIRVLib.pc' 2>/dev/null | grep -q .; then
         die "no está LLVMSPIRVLib.pc en el sysroot -- corré primero: scripts/build-mesa.sh spirv-llvm-translator"
+    fi
+    if ! find "${LFS_SYSROOT}/usr/lib" -maxdepth 1 -name 'libelf.so*' 2>/dev/null | grep -q .; then
+        die "no está libelf en el sysroot (lo necesita radeonsi) -- corré primero: scripts/build-mesa.sh elfutils"
     fi
 
     log "Mesa ${MESA_VERSION} para ${LFS_TGT} — Meson+Ninja (gallium: iris/radeonsi/nouveau/llvmpipe, vulkan: amd/intel, + mesa-clc/intel_clc vía Clang/SPIRV-Tools/LLVMSPIRVLib)"
@@ -1010,6 +1120,8 @@ main() {
         verify-spirv-tools)       step_verify_spirv_tools ;;
         spirv-llvm-translator)    step_spirv_llvm_translator ;;
         verify-spirv-llvm-translator) step_verify_spirv_llvm_translator ;;
+        elfutils)                 step_elfutils ;;
+        verify-elfutils)          step_verify_elfutils ;;
         mesa)                     step_mesa ;;
         verify-mesa)              step_verify_mesa ;;
         all)
@@ -1020,11 +1132,12 @@ main() {
             step_spirv_headers
             step_spirv_tools;             step_verify_spirv_tools
             step_spirv_llvm_translator;   step_verify_spirv_llvm_translator
+            step_elfutils;    step_verify_elfutils
             step_mesa;        step_verify_mesa
-            log "Fase 6 parte 2 ('Mesa + LLVM') completa: libdrm, LLVM+Clang (X86+AMDGPU), SPIRV-Tools, SPIRV-LLVM-Translator y Mesa (iris/radeonsi/nouveau/llvmpipe + Vulkan amd/intel, con mesa-clc/intel_clc para Intel real) listos en el sysroot. Falta Qt6/KDE Frameworks -- va en su propio script."
+            log "Fase 6 parte 2 ('Mesa + LLVM') completa: libdrm, LLVM+Clang (X86+AMDGPU), SPIRV-Tools, SPIRV-LLVM-Translator, elfutils (libelf) y Mesa (iris/radeonsi/nouveau/llvmpipe + Vulkan amd/intel, con mesa-clc/intel_clc para Intel real) listos en el sysroot. Falta Qt6/KDE Frameworks -- va en su propio script."
             ;;
         *)
-            die "target desconocido: ${target} (usar: libdrm|llvm-native|llvm|glslang-native|spirv-headers|spirv-tools|spirv-llvm-translator|mesa|all, cada uno con su verify-<paso> salvo llvm-native/glslang-native/spirv-headers)"
+            die "target desconocido: ${target} (usar: libdrm|llvm-native|llvm|glslang-native|spirv-headers|spirv-tools|spirv-llvm-translator|elfutils|mesa|all, cada uno con su verify-<paso> salvo llvm-native/glslang-native/spirv-headers)"
             ;;
     esac
 }

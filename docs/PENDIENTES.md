@@ -249,8 +249,10 @@ las Partes 2/3.
   sourcea otros scripts de fase). Targets: `libdrm`, `verify-libdrm`,
   `llvm-native`, `llvm`, `verify-llvm`, `glslang-native`, `spirv-headers`,
   `spirv-tools`, `verify-spirv-tools`, `spirv-llvm-translator`,
-  `verify-spirv-llvm-translator`, `mesa`, `verify-mesa`, `all` (los últimos
-  cinco agregados 2026-09-02, ver el "Duodécimo error real" más abajo).
+  `verify-spirv-llvm-translator`, `elfutils`, `verify-elfutils`, `mesa`,
+  `verify-mesa`, `all` (los del bloque SPIRV agregados 2026-09-02, ver el
+  "Duodécimo error real" más abajo; `elfutils`/`verify-elfutils`
+  agregados el mismo día, ver el "Décimo sexto error real").
 - **Alcance de hardware, confirmado por vos:** el laboratorio tiene máquinas
   mixtas (Nvidia RTX 3060, AMD RX 7700, gráfica integrada Intel, "etc"), o
   sea que no se puede asumir una sola marca — el driver stack tiene que
@@ -813,6 +815,112 @@ las Partes 2/3.
   son la misma cosa -- como pasó acá con dos errores reales seguidos
   (Décimo cuarto y Décimo quinto) que en realidad eran síntomas del
   mismo problema de fondo.
+- **Décimo sexto error real (2026-09-02), corregido -- con LLVM+Clang y
+  SPIRV-LLVM-Translator ya completos en el sysroot (Décimo quinto error
+  ya resuelto), la corrida real de `mesa` avanzó bastante más lejos que
+  nunca antes en este proyecto y recién ahí frenó:**
+  ```
+  Run-time dependency LLVM (modules: ...) found: YES 23.1.0
+  Run-time dependency llvmspirvlib found: YES 23.1.0.0
+  Run-time dependency spirv-tools found: YES 2026.3.1
+  Library clang-cpp found: YES
+  Run-time dependency libelf found: NO  (tried pkg-config and cmake)
+  Library elf found: NO
+  meson.build:2149:2: ERROR: Problem encountered: Gallium driver
+    radeonsi requires libelf
+  ```
+  (con la consiguiente falla en cascada de `verify-mesa`, que reportó
+  faltantes de `iris_dri.so`, `radeonsi_dri.so`, `nouveau_dri.so`,
+  `swrast_dri.so`, `libvulkan_radeon.so`, `libvulkan_intel.so` y
+  `libEGL.so` -- todos consecuencia directa de que Mesa nunca llegó a
+  compilar nada, no bugs nuevos).
+
+  **Causa raíz:** el driver Gallium `radeonsi` (AMD, elegido para la RX
+  7700 real del lab -- ver aviso al principio de `build-mesa.sh`) usa
+  libelf en su runtime linker de ELF (`src/amd/common/ac_rtld.c`, para
+  relocar en tiempo de ejecución los binarios que el propio backend
+  AMDGPU de LLVM produce al compilar shaders) -- no es opcional para
+  esta selección de drivers. Ningún paso anterior de este proyecto
+  compiló libelf para `${LFS_TGT}`: el `libelf-dev` que ya estaba en el
+  `Dockerfile` es del compilador NATIVO del contenedor (build machine),
+  y esto es un build cruzado -- Mesa resuelve dependencias contra
+  `${LFS_SYSROOT}`, no contra el sysroot del host, así que ese paquete
+  de apt no cuenta para nada acá.
+
+  **Fix real:** se agregó `step_elfutils()`/`step_verify_elfutils()`
+  nuevos a `build-mesa.sh` (entre SPIRV-LLVM-Translator y Mesa, tanto en
+  el dispatch de `main()` como en la secuencia `all`), y una
+  precondición nueva en `step_mesa()` que frena con mensaje claro si
+  falta. Se compila el paquete elfutils COMPLETO por Autotools
+  (`--host=${LFS_TGT} --build=$(build_triplet) --prefix=/usr`, mismo
+  patrón que `step_libnftnl()` de `build-security.sh`), NO sólo el
+  subdirectorio `libelf/` a mano: confirmado contra el `Makefile.am`
+  real del proyecto (rama principal, research en vivo del 2026-09-02)
+  que `SUBDIRS` ahí es una lista fija sin ningún equivalente al
+  `create_subdirectory_options()` de LLVM/Clang -- no hay mecanismo
+  oficial para levantar sólo una parte, así que recortarlo a mano acá
+  hubiera repetido el mismo error de fondo que el Décimo quinto (ver su
+  Lección, arriba). No hacía falta arriesgarse: elfutils es chico,
+  construir debuginfod/libdw/libasm/eu-* de más son segundos, no las
+  horas de LLVM.
+
+  Tampoco se instala/verifica un `libelf.pc`: confirmado contra
+  `libelf/Makefile.am` real que esta librería nunca generó uno (no hay
+  `libelf.pc.in` en el árbol) -- por eso el log de Mesa arriba prueba
+  las DOS rutas (`Run-time dependency` vía pkg-config/cmake, y por
+  separado `Library elf` vía `cc.find_library`) antes de rendirse; a
+  nosotros nos alcanza con que exista `libelf.so` instalado, que es lo
+  que la segunda ruta encuentra. `step_verify_elfutils()` chequea
+  `libelf.h` + `libelf.so*` en el sysroot, no un `.pc` inexistente.
+
+  Flags de configure elegidos: `--disable-nls` (no hace falta i18n
+  acá); `--disable-libdebuginfod`/`--disable-debuginfod` (el
+  `configure.ac` real ya los deja en "no" solo si no encuentra
+  libcurl/json-c/libmicrohttpd/libarchive/sqlite3 -- ninguno está en el
+  sysroot -- pero se pasan explícitos para no depender de ese
+  autodescubrimiento, mismo criterio que ya se usa en todo el proyecto
+  para lo que se elige apagar a propósito). zlib (el único requisito
+  "mandatory" real de elfutils, confirmado contra el `configure.ac`:
+  "zlib is mandatory") ya estaba en el sysroot desde `build-comms.sh`;
+  bzip2/xz/zstd quedan en su default "auto" y se autodesactivan solos.
+
+  Efecto secundario necesario: `build-mesa.sh` no tenía ningún paso
+  Autotools hasta ahora (libdrm/LLVM/SPIRV-*/Mesa son todos Meson o
+  CMake), así que tampoco tenía el helper `build_triplet()` que sí
+  existe en `build-security.sh`/`build-desktop.sh`/
+  `build-userspace.sh`/`build-comms.sh` -- se agregó la misma
+  definición exacta (`"${LFS_BUILD}/binutils-${BINUTILS_VERSION}/config.guess"`)
+  a `build-mesa.sh`. Sin este agregado, `step_elfutils()` hubiera
+  fallado en runtime con "build_triplet: command not found" -- se
+  encontró revisando qué helpers locales tiene realmente el archivo
+  antes de dar el fix por terminado, no asumiendo que estaba porque
+  otros scripts del proyecto lo tienen.
+
+  Versión de elfutils (`0.191`) y su mirror (`sourceware.org/elfutils/ftp`)
+  quedaron marcados `VERIFICAR` en `env.sh`: `sourceware.org` devolvió
+  403 desde este sandbox de research (mismo problema ya documentado ahí
+  para zlib.net/gitlab.fd.o), así que la versión se confirmó indirecto
+  contra la portada real del proyecto en vez de por fetch directo del
+  tarball -- pero `LVM2_MIRROR`/`BZIP2_MIRROR` de este mismo `env.sh` ya
+  usan `sourceware.org` con éxito en corridas reales de este proyecto,
+  así que el dominio en sí no debería ser problema para el contenedor
+  del usuario. Falta confirmación empírica de esta corrida puntual.
+
+  Validado con `bash -n` y `shellcheck -S warning -e SC1091` (limpio)
+  sobre `build-mesa.sh` y `env.sh`.
+
+  **Lección:** un dependencia "hard requirement" de un driver
+  específico (acá, radeonsi -> libelf) puede quedar completamente
+  invisible hasta que el build real llega literalmente a esa línea del
+  `meson.build` -- ni el research previo de Mesa (que sí encontró
+  Clang/SPIRV-Tools/LLVMSPIRVLib de antemano, leyendo el `meson.build`
+  real) lo había marcado, porque el research se había enfocado en
+  `with_driver_using_cl` (Intel) y no en los requisitos propios de cada
+  gallium driver elegido por separado. Conviene, para la Parte 3 en
+  adelante, revisar los `meson.build`/`CMakeLists.txt` reales de lo que
+  sigue buscando explícitamente cada línea de `require`/`error` por
+  driver/feature habilitado, no sólo las dependencias que ya se sabía
+  que iban a hacer falta.
 
 ## Fase 6 — Parte 3 (no empezada)
 
