@@ -734,6 +734,86 @@ las Partes 2/3.
   directamente pero sí depende de encontrar a LLVM vía CMake) antes de
   asumir que la lista de targets ya está completa.
 
+  **Esta lección queda corregida por el error siguiente (Décimo quinto):
+  acotar targets de LLVM/Clang a mano no compone con `find_package(LLVM)`
+  en modo CONFIG, sin importar cuántos componentes intermedios se vayan
+  agregando a mano. La forma correcta era otra desde el principio.**
+- **Décimo quinto error real (2026-09-02), corregido -- con
+  `install-cmake-exports` ya instalado (fix anterior), CMake avanzó un
+  paso más en SPIRV-LLVM-Translator y volvió a fallar, ahora tratando de
+  *usar* un componente de LLVM que nunca se instaló:**
+  ```
+  CMake Error at /lfs/usr/lib/cmake/llvm/LLVMExports.cmake:1148
+  (message):
+    The imported target "LLVMDemangle" references the file
+       "/lfs/usr/lib/libLLVMDemangle.a"
+    but this file does not exist.
+  -- Configuring incomplete, errors occurred!
+  ```
+  (con los correspondientes fallos en cascada de
+  `step_verify_spirv_llvm_translator()` y, más abajo, de Mesa y su
+  verificación -- ambos consecuencia directa de este mismo error, no
+  bugs nuevos).
+
+  **Causa raíz:** acotar el *build* a 4 targets (Ronda 2 del error
+  anterior) nunca acota lo que CMake *exporta*. Confirmado contra
+  `AddLLVM.cmake` real: la macro `add_llvm_library` (y
+  `add_llvm_component_library`, que la usa por dentro) agrega SIEMPRE el
+  nombre de cada librería a la propiedad global `LLVM_EXPORTS`, sin
+  ninguna condición sobre si esa librería terminó siendo parte del build
+  pedido. LLVM define ~80 de estas librerías (`LLVMDemangle`,
+  `LLVMSupport`, `LLVMCore`, etc.); pedir sólo `LLVM`/`clang-cpp`/
+  `llvm-headers`/`clang-headers` construyó igual el `.so` agregado
+  (`libLLVM.so`) pero no las ~80 librerías estáticas individuales que lo
+  componen. `LLVMExports.cmake` (generado por `install-cmake-exports`,
+  ya instalado) las lista a todas igual, apuntando a rutas
+  (`libLLVMDemangle.a`, etc.) que jamás se compilaron. Cualquier
+  consumidor en modo `find_package(LLVM CONFIG)` (como
+  SPIRV-LLVM-Translator) carga ese archivo entero al hacer
+  `include(LLVMExports.cmake)`, así que basta con que UN componente
+  falte para que falle la configuración completa, aunque el proyecto en
+  cuestión sólo use `LLVM`/`clang-cpp`. No hay forma de acotar el build
+  "desde afuera" (eligiendo qué construir) que sea compatible con este
+  mecanismo -- hay que acotarlo "desde adentro", con el mecanismo que
+  LLVM ya provee para eso.
+
+  **Fix real:** revertir por completo el acotado de targets de la Ronda
+  2 -- volver a `ninja` (sin argumentos) y `ninja install` (sin
+  argumentos) en `step_llvm()`, o sea el build e install COMPLETOS,
+  igual que antes del Décimo tercer error. Para evitar el problema
+  original de esa ronda (el link roto de `clang-fuzzer-dictionary`), se
+  usa en cambio el mecanismo real que LLVM expone para esto: cada
+  subcarpeta de `clang/tools/` recibe automáticamente un flag
+  `CLANG_TOOL_<NOMBRE>_BUILD` (confirmado contra
+  `create_subdirectory_options()`, invocada como
+  `create_subdirectory_options(CLANG TOOL)` al principio del
+  `clang/tools/CMakeLists.txt` real, y consumida por
+  `add_llvm_subdirectory()`/`add_clang_subdirectory()` en
+  `AddLLVM.cmake`/`AddClang.cmake`). Agregando
+  `-DCLANG_TOOL_CLANG_FUZZER_BUILD=OFF` al `cmake` de configuración, esa
+  subcarpeta ni siquiera se agrega al build (`add_subdirectory()` no se
+  llama), así que `clang-fuzzer-dictionary` desaparece del grafo de
+  ninja sin tocar ningún otro target -- y con el build completo, las ~80
+  librerías que `LLVMExports.cmake` necesita quedan todas instaladas de
+  verdad. Ya aplicado en `step_llvm()` de `build-mesa.sh`; no hizo falta
+  tocar `step_verify_llvm()` (los chequeos existentes de
+  `libLLVM*.so*`/`libclang-cpp.so*`/`llvm-config --includedir`/
+  `LLVMConfig.cmake` siguen siendo válidos, ahora con más garantía
+  porque todo lo que verifican existe de verdad). Validado con `bash -n`
+  y `shellcheck -S warning -e SC1091` (limpio).
+
+  **Lección:** cuando un proyecto de terceros expone un mecanismo
+  genérico para desactivar partes puntuales del build (acá,
+  `create_subdirectory_options()` + `<PROYECTO>_<TIPO>_<NOMBRE>_BUILD`),
+  conviene buscarlo primero y usarlo, en vez de tratar de lograr el
+  mismo resultado "desde afuera" acotando a mano qué targets pedirle a
+  ninja. Lo segundo puede funcionar para el build en sí, pero rompe
+  silenciosamente cualquier mecanismo del proyecto que asuma que "lo que
+  se construye" y "lo que se declara disponible" (acá, `LLVM_EXPORTS`)
+  son la misma cosa -- como pasó acá con dos errores reales seguidos
+  (Décimo cuarto y Décimo quinto) que en realidad eran síntomas del
+  mismo problema de fondo.
+
 ## Fase 6 — Parte 3 (no empezada)
 
 - **Parte 3 — Qt6 + KDE Frameworks/kwin/plasma-workspace + tema oscuro/Nerd

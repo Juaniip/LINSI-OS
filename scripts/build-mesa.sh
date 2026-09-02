@@ -509,66 +509,62 @@ step_llvm() {
         -DLLVM_DEFAULT_TARGET_TRIPLE="${LFS_TGT}" \
         -DLLVM_HOST_TRIPLE="${LFS_TGT}" \
         -DCLANG_LINK_CLANG_DYLIB=ON \
+        -DCLANG_TOOL_CLANG_FUZZER_BUILD=OFF \
         "${LLVM_CMAKE_COMMON_FLAGS[@]}"
 
-    # AGREGADO 2026-09-0X, error real: pedir "ninja" sin target (= "all")
-    # intenta construir TODOS los binarios de LLVM+Clang -- unos 4600
-    # targets, incluidos ~130 herramientas standalone que no usamos para
-    # nada (llvm-mca, llvm-objdump, clang-fuzzer-dictionary, etc.). Uno de
-    # esos, clang-fuzzer-dictionary (clang/tools/clang-fuzzer/dictionary/),
-    # rompió el build real:
-    #   ld: lib/libLLVM.so.23.1: undefined reference to
-    #   `std::ctype<char>::_M_widen_init() const@GLIBCXX_3.4.11' (+ decenas
-    #   más de símbolos GLIBCXX/CXXABI)
-    # Causa real: dictionary.c es la ÚNICA fuente puramente en C de todo
-    # clang/llvm/tools -- CMake detecta el "linker language" de ese target
-    # como C (no C++) y usa el driver `gcc` para linkear, no `g++`. `gcc`
-    # (a diferencia de `g++`) NO agrega automáticamente `-lstdc++` aunque el
-    # binario dependa de una librería C++ (acá, libLLVM.so) -- confirmado
-    # contra clang/tools/clang-fuzzer/dictionary/CMakeLists.txt real: no
-    # hay ningún guard/opción de CMake para desactivar sólo este target
-    # puntual (`add_clang_subdirectory(clang-fuzzer)` en
-    # clang/tools/CMakeLists.txt es incondicional).
+    # HISTORIA de este bloque (se deja completa a propósito -- las dos
+    # rondas anteriores llevaron a un diagnóstico incompleto, vale la pena
+    # que quede el resultado final Y el motivo del cambio de rumbo):
     #
-    # La solución real no es parchear ese target (ni ninguno de los otros
-    # ~180 que tampoco usamos) -- es no pedirlos. De TODO lo que compila
-    # "all", Mesa sólo necesita 4 targets con nombre bien definido en el
-    # CMake real de LLVM/Clang (confirmado contra llvm/CMakeLists.txt y
-    # clang/CMakeLists.txt de la tag llvmorg-${LLVM_VERSION}):
-    #   - LLVM              -> el .so (libLLVM.so.<ver>), dep_llvm de Mesa
-    #   - clang-cpp         -> el .so (libclang-cpp.so.<ver>), dep_clang
-    #   - llvm-headers      -> headers de LLVM instalados (llvm-config
-    #                          --includedir apunta ahí)
-    #   - clang-headers     -> headers de Clang instalados (mesa-clc
-    #                          incluye <clang/...> directo, ver
-    #                          src/compiler/clc/clc_helpers.cpp real)
-    # Cada uno de estos, vía add_llvm_library/add_clang_library, ya trae un
-    # target "install-<nombre>" generado por add_llvm_install_targets()
-    # (AddLLVM.cmake real) que depende del target de build correspondiente
-    # -- entonces "ninja install-LLVM install-clang-cpp ..." construye SÓLO
-    # lo que hace falta para esos cuatro (reusa todos los .o de clang que
-    # clang-cpp empaqueta) y nunca le pide nada a ninja sobre
-    # clang-fuzzer-dictionary ni al resto de los ~180 binarios sueltos.
+    # Ronda 1 -- error real: pedir "ninja" sin target (= "all") intenta
+    # construir TODOS los binarios de LLVM+Clang -- unos 4600 targets,
+    # incluidos ~130 herramientas standalone que no usamos para nada
+    # (llvm-mca, llvm-objdump, clang-fuzzer-dictionary, etc.). Uno de esos,
+    # clang-fuzzer-dictionary (clang/tools/clang-fuzzer/dictionary/), rompía
+    # el link real (dictionary.c es la única fuente puramente en C de todo
+    # clang/llvm/tools -- CMake usa `gcc`, no `g++`, como driver de link
+    # para ese target puntual, y `gcc` no agrega `-lstdc++` aunque el
+    # binario dependa de libLLVM.so).
     #
-    # AGREGADO 2026-09-02, error real Nº2 de esta misma corrida: acotar a
-    # esos 4 targets se llevó puesto, sin querer, un quinto componente que
-    # SPIRV-LLVM-Translator necesita para encontrar a LLVM vía
-    # find_package(LLVM): "LLVMConfig.cmake" no lo instala install-LLVM ni
-    # ninguno de los otros tres -- viene de un componente aparte,
-    # "cmake-exports", confirmado contra llvm/cmake/modules/CMakeLists.txt
-    # real (tag llvmorg-${LLVM_VERSION}): ahí es donde se generan
-    # (configure_file, en tiempo de cmake, no de build) y se instalan
-    # LLVMConfig.cmake + LLVMConfigVersion.cmake + LLVMExports.cmake, todos
-    # con "COMPONENT cmake-exports", vía un target autogenerado
-    # "install-cmake-exports" (mismo mecanismo add_llvm_install_targets()
-    # de siempre). A diferencia de install-LLVM/install-clang-cpp, este
-    # target no depende de compilar nada -- los .cmake ya están generados
-    # apenas corre el "cmake -S ... -B" de más arriba -- así que agregarlo
-    # acá es gratis, no dispara ningún build adicional.
-    ninja -C "${bdir}" ${MAKEFLAGS} LLVM clang-cpp llvm-headers clang-headers
-    DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" \
-        install-LLVM install-clang-cpp install-llvm-headers install-clang-headers \
-        install-cmake-exports
+    # Ronda 2 -- la respuesta que le dimos entonces fue acotar el build a
+    # sólo 4 targets con nombre bien definido (LLVM, clang-cpp,
+    # llvm-headers, clang-headers) más sus install-<nombre> -- evitando así
+    # tocar clang-fuzzer-dictionary. Eso destapó DOS problemas nuevos, uno
+    # atrás del otro, al llegar a SPIRV-LLVM-Translator (que resuelve LLVM
+    # vía find_package(LLVM), CMake modo CONFIG):
+    #   1. Faltaba LLVMConfig.cmake (componente aparte, "cmake-exports",
+    #      que install-LLVM no trae) -- se agregó install-cmake-exports.
+    #   2. Con LLVMConfig.cmake ya instalado, CMake tiraba:
+    #        "The imported target LLVMDemangle references the file
+    #         /lfs/usr/lib/libLLVMDemangle.a but this file does not exist"
+    #      Causa raíz real (confirmada contra AddLLVM.cmake): CADA librería
+    #      creada con add_llvm_library/add_llvm_component_library
+    #      (LLVMDemangle, LLVMSupport, LLVMCore, ... son ~80) se agrega
+    #      SIEMPRE a la propiedad global LLVM_EXPORTS, sin importar si
+    #      pedimos construirla o instalarla -- no hay forma de "acotar" el
+    #      build sin que LLVMExports.cmake termine listando componentes que
+    #      nunca se instalaron. El único mecanismo real para exportar un
+    #      subconjunto (LLVM_DISTRIBUTIONS, en LLVMDistributionSupport.cmake)
+    #      es harina de otro costal -- exige coordinar Clang por separado y
+    #      no vale la pena para lo que necesitamos acá.
+    #
+    # Ronda 3 (la actual, correcta) -- en vez de tratar de reconstruir a
+    # mano el grafo de dependencias de instalación de un proyecto de este
+    # tamaño, la solución real es la que LLVM ya provee para este caso
+    # exacto: cada subcarpeta de clang/tools/ tiene su propio flag
+    # "CLANG_TOOL_<NOMBRE>_BUILD" (autogenerado por
+    # create_subdirectory_options() en clang/tools/CMakeLists.txt real,
+    # consumido por add_llvm_subdirectory() en AddLLVM.cmake) -- la
+    # investigación de la Ronda 1 decía que "no hay ningún guard", pero no
+    # había mirado ese mecanismo genérico, sólo el CMakeLists.txt puntual
+    # de clang-fuzzer/dictionary. Con -DCLANG_TOOL_CLANG_FUZZER_BUILD=OFF
+    # (ver flags de cmake más arriba) directamente no se configura NADA de
+    # clang-fuzzer/ (dictionary incluido) -- así que volvemos al build e
+    # install COMPLETOS de siempre, que instalan todas las librerías reales
+    # (dejando LLVMExports.cmake consistente) sin tocar el único target
+    # roto.
+    ninja -C "${bdir}" ${MAKEFLAGS}
+    DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
 
     # Pisar el llvm-config cruzado (instalado recién por el "ninja install"
     # de arriba, pero NO ejecutable acá sin chroot) con el nativo -- ver el
