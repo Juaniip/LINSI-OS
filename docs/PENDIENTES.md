@@ -921,6 +921,73 @@ las Partes 2/3.
   sigue buscando explícitamente cada línea de `require`/`error` por
   driver/feature habilitado, no sólo las dependencias que ya se sabía
   que iban a hacer falta.
+- **Décimo séptimo error real (2026-09-02), corregido -- primera corrida
+  real de `step_elfutils()` (fix anterior), rompió compilando `libcpu/`,
+  ni siquiera llegó a `libelf` (que de hecho compiló bien, antes de
+  `libcpu/` en el orden de `SUBDIRS`):**
+  ```
+  ../../libcpu/riscv_disasm.c: In function 'riscv_disasm':
+  ../../libcpu/riscv_disasm.c:1259:46: error: initialization discards
+    'const' qualifier from pointer target type
+    [-Werror=discarded-qualifiers]
+   1259 |                   struct known_csrs *found = bsearch (&key, known,
+        |                                              ^~~~~~~
+  cc1: all warnings being treated as errors
+  make[2]: *** [Makefile:547: riscv_disasm.o] Error 1
+  ```
+  (con las caídas en cascada esperables de `verify-elfutils`, `mesa`
+  -- frenada limpio por la precondición nueva de `step_mesa()`, tal
+  como se diseñó -- y `verify-mesa`: ningún driver de Mesa se llegó a
+  compilar porque Mesa ni arrancó.)
+
+  **Causa raíz:** bug real de elfutils 0.191, ya corregido río arriba en
+  versiones posteriores (confirmado contra el mirror de GitHub del
+  branch principal: la misma línea ahí ya tiene `const` puesto). El
+  código de `libcpu/riscv_disasm.c` declara
+  `struct known_csrs *found = bsearch(...)` SIN `const`, pero busca
+  sobre `known`, una tabla `static const struct known_csrs known[]` --
+  y el glibc cross-compilado de este proyecto (Fase 2) le da a `bsearch`
+  un overload const-correcto bajo `_FORTIFY_SOURCE=3` (activo acá,
+  confirmado en el log de `configure`: "checking whether to add
+  -D_FORTIFY_SOURCE=2 or =3 to CFLAGS... yes -D_FORTIFY_SOURCE=3"), que
+  devuelve `const struct known_csrs *` cuando la base es `const` -- y
+  ESO es lo que choca con `-Werror=discarded-qualifiers`, que elfutils
+  trae de fábrica en su propio `configure.ac` (agrega `-Werror` en cada
+  feature-check de compilador, sin ningún `--disable-werror` que lo
+  apague entero -- confirmado, no existe esa opción). No es nada propio
+  de este proyecto ni de la selección de drivers: es el desensamblador
+  de RISC-V, que ni x86_64 ni AMDGPU tocan -- confirmado además que es
+  el ÚNICO archivo de `libcpu/` que usa `bsearch`
+  (`i386_disasm.c`/`x86_64_disasm.c`/`bpf_disasm.c` no lo usan).
+
+  **Fix real:** `step_elfutils()` ahora aplica un parche de una línea a
+  `libcpu/riscv_disasm.c` antes de compilar (agrega el `const` que
+  faltaba), con un chequeo de idempotencia (para no duplicar "const" si
+  se re-corre el mismo target sobre el mismo `${LFS_BUILD}` persistente)
+  y un `die()` si la línea esperada no aparece (por si una versión
+  futura de elfutils cambia el archivo). Se aplica con `sed` en vez de
+  un `patches/*.patch` con `patch -p1`: no hay forma de confirmar el
+  whitespace exacto (tabs vs espacios) del tarball real sin poder
+  bajarlo desde este sandbox de research (`sourceware.org` bloqueado,
+  ver `VERIFICAR` en `env.sh`) -- un patch de contexto armado a ciegas
+  se puede rechazar por un mismatch de espaciado; un `sed` que sólo
+  reemplaza el fragmento de código puntual (no la línea completa) no
+  tiene ese problema. También se agregó `rm -rf "${bdir}"` antes de
+  reconfigurar (esta corrida sí dejó un `build/` a medio hacer de la
+  corrida que falló, a diferencia de `libnftnl`/`libmnl`, que nunca
+  tuvieron ese caso). Validado con `bash -n` y
+  `shellcheck -S warning -e SC1091` (limpio).
+
+  **Lección:** un `-Werror` heredado del propio proyecto de terceros
+  (no algo que este proyecto haya elegido) puede convertir un simple
+  warning de compatibilidad de compilador/libc en un build roto -- y
+  cuando el código roto está en un componente que ni hace falta (acá,
+  el backend RISC-V de un desensamblador multi-arquitectura), vale la
+  pena confirmar primero si el bug ya está arreglado río arriba (research
+  contra el repo real, no asumir) antes de considerar deshabilitar el
+  componente entero o bajar el nivel de warnings del proyecto completo
+  -- un parche de una línea, acotado al bug puntual, es menos riesgoso
+  que cualquiera de esas dos alternativas más generales.
 
 ## Fase 6 — Parte 3 (no empezada)
 
