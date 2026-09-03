@@ -100,9 +100,11 @@
 #
 # Orden (cada paso depende del anterior):
 #   1. libdrm                  -> bindings de espacio de usuario al DRM/GEM
-#   2. llvm-native              -> build NATIVO mínimo (llvm-tblgen +
-#                                  llvm-config + clang-tblgen), no se instala
-#                                  nada del sistema final con esto
+#   2. llvm-native              -> build NATIVO (llvm-tblgen + llvm-config +
+#                                  clang-tblgen + libLLVM.so + libclang-cpp.so
+#                                  NATIVAS, éstas últimas para mesa_clc --
+#                                  ver Décimo noveno error real), no se
+#                                  instala nada del sistema final con esto
 #   3. llvm                     -> build CRUZADO real (libLLVM + libclang-cpp
 #                                  + headers), el que efectivamente queda en
 #                                  el sysroot
@@ -479,22 +481,43 @@ _llvm_fetch_extract() {
 }
 
 step_llvm_native() {
-    log "LLVM+Clang ${LLVM_VERSION} — build NATIVO (llvm-tblgen + llvm-config + clang-tblgen, para el build cruzado)"
+    log "LLVM+Clang ${LLVM_VERSION} — build NATIVO (llvm-tblgen + llvm-config + clang-tblgen + libLLVM.so + libclang-cpp.so nativas, para el build cruzado y para mesa_clc)"
     _llvm_fetch_extract
 
     local src="${LFS_BUILD}/llvm-project-${LLVM_VERSION}.src"
     rm -rf "${LLVM_NATIVE_BUILD}"
 
+    # Décimo noveno error real (2026-09-03): agregado libLLVM.so + libclang-cpp.so
+    # NATIVAS a este build (targets CMake "LLVM" y "clang-cpp") -- hasta acá este
+    # build nativo sólo pedía tres binarios puntuales (llvm-tblgen/llvm-config/
+    # clang-tblgen), ninguno de los cuales termina necesitando el .so completo de
+    # LLVM/Clang en tiempo de ejecución (son herramientas chicas, linkeadas contra
+    # los .a estáticos que quedan en este mismo directorio). mesa_clc, en cambio,
+    # SÍ necesita libLLVM.so/libclang-cpp.so NATIVAS de verdad -- ver el
+    # comentario largo en step_mesa() sobre por qué (parchear su native:true no
+    # alcanza sin esto). -DCLANG_LINK_CLANG_DYLIB=ON es el mismo flag que ya usa
+    # step_llvm() (build CRUZADO) para producir libclang-cpp.so ahí; acá se repite
+    # para el lado NATIVO. -DCLANG_TOOL_CLANG_FUZZER_BUILD=OFF por la misma razón
+    # documentada en step_llvm(): evita que ese subdirectorio (la única fuente en
+    # C puro de todo clang/llvm/tools, rompe el link con `gcc` en vez de `g++`)
+    # se configure siquiera -- acá no debería hacer falta porque pedimos targets
+    # puntuales, no "ninja" a secas, pero se deja por las dudas, no cuesta nada.
     cmake -S "${src}/llvm" -B "${LLVM_NATIVE_BUILD}" -G Ninja \
         -DCMAKE_INSTALL_PREFIX="${LFS_SYSROOT}/usr" \
+        -DCLANG_LINK_CLANG_DYLIB=ON \
+        -DCLANG_TOOL_CLANG_FUZZER_BUILD=OFF \
         "${LLVM_CMAKE_COMMON_FLAGS[@]}"
 
-    ninja -C "${LLVM_NATIVE_BUILD}" ${MAKEFLAGS} llvm-tblgen llvm-config clang-tblgen
+    ninja -C "${LLVM_NATIVE_BUILD}" ${MAKEFLAGS} llvm-tblgen llvm-config clang-tblgen LLVM clang-cpp
 
     [[ -x "${LLVM_TABLEGEN_NATIVE}" ]] || die "no se compiló llvm-tblgen nativo"
     [[ -x "${LLVM_NATIVE_BUILD}/bin/llvm-config" ]] || die "no se compiló llvm-config nativo"
     [[ -x "${CLANG_TABLEGEN_NATIVE}" ]] || die "no se compiló clang-tblgen nativo -- ¿LLVM_ENABLE_PROJECTS incluye 'clang'?"
-    log "LLVM+Clang nativos listos: llvm-tblgen en ${LLVM_TABLEGEN_NATIVE}, clang-tblgen en ${CLANG_TABLEGEN_NATIVE}"
+    find "${LLVM_NATIVE_BUILD}/lib" -maxdepth 1 -name 'libLLVM.so*' 2>/dev/null | grep -q . \
+        || die "no se compiló libLLVM.so nativa en ${LLVM_NATIVE_BUILD}/lib -- ¿el target 'LLVM' de CMake cambió de nombre?"
+    find "${LLVM_NATIVE_BUILD}/lib" -maxdepth 1 -name 'libclang-cpp.so*' 2>/dev/null | grep -q . \
+        || die "no se compiló libclang-cpp.so nativa en ${LLVM_NATIVE_BUILD}/lib -- ¿el target 'clang-cpp' de CMake cambió de nombre?"
+    log "LLVM+Clang nativos listos: llvm-tblgen en ${LLVM_TABLEGEN_NATIVE}, clang-tblgen en ${CLANG_TABLEGEN_NATIVE}, libLLVM.so + libclang-cpp.so en ${LLVM_NATIVE_BUILD}/lib"
 }
 
 step_llvm() {
@@ -1045,6 +1068,13 @@ step_mesa() {
     if ! find "${LFS_SYSROOT}/usr/lib" -maxdepth 1 -name 'libclang-cpp.so*' 2>/dev/null | grep -q .; then
         die "no está libclang-cpp.so en el sysroot -- corré primero: scripts/build-mesa.sh llvm (ya con LLVM_ENABLE_PROJECTS=clang)"
     fi
+    # mesa_clc necesita, además, libLLVM.so/libclang-cpp.so NATIVAS de verdad
+    # (no las cruzadas de arriba) -- ver el comentario largo más abajo, antes
+    # del patch a src/compiler/clc/meson.build (Décimo noveno error real).
+    if ! find "${LLVM_NATIVE_BUILD}/lib" -maxdepth 1 -name 'libLLVM.so*' 2>/dev/null | grep -q . \
+        || ! find "${LLVM_NATIVE_BUILD}/lib" -maxdepth 1 -name 'libclang-cpp.so*' 2>/dev/null | grep -q .; then
+        die "no están libLLVM.so/libclang-cpp.so NATIVAS en ${LLVM_NATIVE_BUILD}/lib -- corré primero: scripts/build-mesa.sh llvm-native"
+    fi
     if ! find "${LFS_SYSROOT}/usr/lib/pkgconfig" -maxdepth 1 -name 'SPIRV-Tools.pc' 2>/dev/null | grep -q .; then
         die "no está SPIRV-Tools.pc en el sysroot -- corré primero: scripts/build-mesa.sh spirv-headers && scripts/build-mesa.sh spirv-tools"
     fi
@@ -1067,6 +1097,53 @@ step_mesa() {
     local src="${LFS_BUILD}/mesa-mesa-${MESA_VERSION}"
     cd "${src}"
 
+    # Décimo noveno error real (2026-09-03) -- parte 1: parchear
+    # src/compiler/clc/meson.build. Texto real (confirmado contra el mirror
+    # de GitHub, mirror/mesa, rama main -- src/compiler/clc/meson.build):
+    #   native : not meson.can_run_host_binaries(),
+    # con este comentario arriba en la fuente real de Mesa: "If we can run
+    # host binaries directly, just build mesa_clc for the host. Most
+    # commonly this happens when doing a cross compile from an x86_64 build
+    # machine to an x86 host". En ESTE proyecto build==host en arquitectura
+    # (los dos son x86_64), así que can_run_host_binaries() da true, native
+    # da false, y Mesa compila mesa_clc con el compilador de la CROSS-FILE
+    # (el propio cross-toolchain de Fase 0, linkeado contra la glibc/
+    # libstdc++ recién compiladas del sysroot) -- NO con el compilador del
+    # --native-file. Es el MISMO error de fondo que "CORREGIDO (2026-08-29)"
+    # en env.sh para wayland-scanner/glib-compile-resources ("misma
+    # arquitectura no implica que corra sin dramas"), pero acá Mesa lo hace
+    # a propósito como optimización de tiempo de build, no por descuido.
+    # Confirmado con `ldd` real sobre el mesa_clc resultante (2026-09-03):
+    #   libstdc++.so.6: version `GLIBCXX_3.4.32' not found
+    #   libc.so.6: version `GLIBC_2.38' not found
+    #   libLLVM.so.23.1 => not found
+    #   libclang-cpp.so.23.1 => not found
+    # -- es decir, un choque de VERSIÓN de glibc/libstdc++ (como
+    # spa-json-dump en build-desktop.sh) SUMADO a librerías cruzadas que ni
+    # siquiera están en el RPATH. Un patchelf de RPATH solo (primer intento,
+    # ver más abajo) no alcanza: arregla lo segundo pero no toca lo primero,
+    # porque el choque de versión de glibc/libstdc++ está grabado en el
+    # propio código objeto (símbolos versionados que pide el binario), no es
+    # cosa de dónde busca las librerías. La única solución real es que
+    # mesa_clc se compile con el compilador NATIVO de punta a punta -- se
+    # fuerza `native : true` a mano (no hay ninguna opción de meson.build de
+    # Mesa que lo permita desde afuera). Sed idempotente + verificación
+    # (falla fuerte si el texto esperado no aparece, mismo criterio que el
+    # resto de los parches de este proyecto).
+    local clc_meson="${src}/src/compiler/clc/meson.build"
+    [[ -f "${clc_meson}" ]] || die "no está ${clc_meson} -- ¿cambió la estructura de directorios de Mesa ${MESA_VERSION}?"
+    # Ojo con la coma final: el match tiene que incluirla (no sólo la
+    # llamada a can_run_host_binaries()) para que no quede "tragada" adentro
+    # del comentario -- si eso pasa, se pierde el separador real entre este
+    # kwarg y el siguiente (install : ...) y meson.build queda con un error
+    # de sintaxis (coma faltante entre argumentos). Verificado con un caso
+    # de prueba real antes de commitear esto.
+    sed -i "s/native[[:space:]]*:[[:space:]]*not meson\.can_run_host_binaries(),/native : true,  # LINSI-OS: forzado nativo, ver docs\/PENDIENTES.md (Decimo noveno error real)/" \
+        "${clc_meson}"
+    grep -q "native : true,  # LINSI-OS" "${clc_meson}" \
+        || die "el parche a ${clc_meson} no prendió -- ¿cambió el texto real de 'native : not meson.can_run_host_binaries(),' en Mesa ${MESA_VERSION}?"
+    log "mesa_clc forzado a native:true en ${clc_meson} (ver Décimo noveno error real)"
+
     local crossfile="${LFS_BUILD}/meson-cross-linsi.ini"
     # llvm-config: ver el comentario largo de "CORRECCIÓN #2" más arriba --
     # el mecanismo config-tool de Meson no cae al PATH para dependencias de
@@ -1074,6 +1151,19 @@ step_mesa() {
     write_meson_crossfile "${crossfile}" "glslangValidator = '${GLSLANG_NATIVE_BIN}'
 llvm-config = '${LFS_SYSROOT}/usr/bin/llvm-config'"
 
+    # Décimo noveno error real -- parte 2 (por qué el --native-file NO
+    # necesita un llvm-config propio): confirmado contra el meson.build real
+    # de Mesa (raíz del repo) -- `dep_llvm = dependency('llvm', method:
+    # ..., ...)` y `dep_spirv_tools = dependency('SPIRV-Tools', ...)` se
+    # declaran SIN `native:` en ningún lado, así que Meson los resuelve
+    # SIEMPRE en contexto host/cruzado (usa el llvm-config del --cross-file
+    # de arriba), sin importar el `native:` puntual del executable() de
+    # mesa_clc que los consume -- ese es justo el mecanismo real detrás del
+    # comentario de Mesa ("si podés correr binarios del host, compilá para
+    # el host"): en un cross real (ARM, etc.) mesa_clc queda native:true
+    # PERO sigue linkeando contra el dep_llvm/dep_spirv_tools del host/
+    # cruzado -- exactamente lo mismo que pasa acá. No hace falta (ni serviría
+    # de nada) un llvm-config nativo en el --native-file para esto.
     local nativefile="${LFS_BUILD}/meson-native-linsi.ini"
     write_meson_nativefile "${nativefile}" "glslangValidator = '${GLSLANG_NATIVE_BIN}'"
 
@@ -1106,40 +1196,46 @@ llvm-config = '${LFS_SYSROOT}/usr/bin/llvm-config'"
         -Dglvnd=disabled \
         -Dgallium-va=disabled
 
-    # Décimo octavo error real (2026-09-0X): con iris/intel_vk habilitados,
-    # Mesa compila mesa_clc (src/compiler/clc/mesa_clc) -- un ejecutable
-    # que corre DURANTE el propio build, invocado directo por ninja, para
+    # Décimo octavo error real (2026-09-02), CORREGIDO/ampliado por el
+    # Décimo noveno (ver el comentario largo más arriba, antes del sed a
+    # src/compiler/clc/meson.build): con iris/intel_vk habilitados, Mesa
+    # compila mesa_clc (src/compiler/clc/mesa_clc) -- un ejecutable que
+    # corre DURANTE el propio build, invocado directo por ninja, para
     # traducir shaders internos en OpenCL C (blorp_shaders.cl, etc.) a
     # SPIR-V. Un `ninja -C "${bdir}" ${MAKEFLAGS}` a secas lo deja reventar
     # en tiempo de ejecución con "error while loading shared libraries:
-    # libLLVM.so.23.1: cannot open shared object file" -- mismo mecanismo
-    # ya documentado para llvm-config más arriba (ver step_llvm()): Meson
-    # linkea mesa_clc contra el llvm-config que señala el --cross-file
-    # (glslangValidator/llvm-config = "${LFS_SYSROOT}/usr/bin/llvm-config"),
-    # y ese llvm-config -- aunque el binario en sí es NATIVO -- fue
-    # compilado con -DCMAKE_INSTALL_PREFIX="${LFS_SYSROOT}/usr", así que
-    # reporta rutas de link/include DENTRO del sysroot cruzado. mesa_clc
-    # termina apuntando a la libLLVM.so CRUZADA de ${LFS_SYSROOT}/usr/lib,
-    # no a la nativa real de ${LLVM_NATIVE_BUILD}/lib -- y como este
-    # proyecto nunca chrootea a /lfs, el loader real del contenedor no
-    # encuentra esa librería cruzada.
+    # libLLVM.so.23.1: cannot open shared object file".
     #
-    # A diferencia de wayland-scanner/glslangValidator, mesa_clc no se
-    # puede "reconstruir aparte" en un prefix propio: es un target más
-    # dentro del mismo árbol de build de Mesa, generado por el propio
-    # meson.build de Mesa. La solución, siguiendo la misma lección que ya
-    # dejamos escrita en env.sh ("si una herramienta de build falla con
-    # 'error while loading shared libraries', la solución NO es tocar
-    # LD_LIBRARY_PATH -- es conseguir una versión genuinamente nativa"): se
-    # compila primero, en un paso de ninja separado, sólo el/los
-    # ejecutable(s) *_clc (mesa_clc, y cualquier otro con el mismo sufijo
-    # que Mesa 26.2.1 pueda agregar, como intel_clc), y se les corrige el
-    # RPATH con patchelf apuntando a ${LLVM_NATIVE_BUILD}/lib -- la MISMA
-    # libLLVM.so nativa que ya usa llvm-config nativo (ver step_llvm()) --
-    # ANTES de lanzar el resto del build. Ninja no los va a volver a
-    # linkear después (ninguno de sus inputs cambia), así que el RPATH
-    # corregido sobrevive intacto cuando ninja los invoca más adelante para
-    # generar los .spv.
+    # Primer intento de fix (Décimo octavo, INSUFICIENTE): patchelear el
+    # RPATH de mesa_clc apuntando a ${LLVM_NATIVE_BUILD}/lib. Se aplicó
+    # limpio (sin error) pero el problema siguió idéntico -- confirmado con
+    # `ldd`/`readelf -d` reales sobre el mesa_clc resultante (ver Décimo
+    # noveno error real más arriba): (a) ${LLVM_NATIVE_BUILD}/lib en ese
+    # momento sólo tenía los .a estáticos de llvm-tblgen/llvm-config/
+    # clang-tblgen, CERO .so -- el RPATH apuntaba a un directorio vacío de
+    # verdad; y (b) más de fondo, mesa_clc ni siquiera se estaba compilando
+    # con el compilador NATIVO -- el propio meson.build de Mesa (`native :
+    # not meson.can_run_host_binaries()`) lo compila con el toolchain
+    # CRUZADO cuando build==host en arquitectura (este caso), así que
+    # además de las libs cruzadas faltantes, el binario pedía símbolos de
+    # glibc/libstdc++ MÁS NUEVOS que los del contenedor
+    # (`GLIBC_2.38`/`GLIBCXX_3.4.32` no encontrados) -- un choque de
+    # VERSIÓN que ningún RPATH puede arreglar, sólo compilar con el
+    # compilador correcto de punta a punta.
+    #
+    # Fix real (Décimo noveno, éste sí verificado por partes): (1) se
+    # fuerza `native : true` en el meson.build de Mesa (sed más arriba) para
+    # que mesa_clc se compile con el compilador NATIVO de verdad; (2)
+    # step_llvm_native() ahora también construye libLLVM.so/libclang-cpp.so
+    # NATIVAS de verdad en ${LLVM_NATIVE_BUILD}/lib; (3) el --native-file le
+    # da a Mesa un llvm-config que apunta a esas rutas nativas reales. El
+    # patchelf de acá abajo queda como RED DE SEGURIDAD, no como el fix
+    # principal: Meson no siempre agrega un RPATH automático para
+    # dependencias resueltas por config-tool (como LLVM acá), así que aunque
+    # mesa_clc ya se compile bien nativo, puede seguir sin encontrar
+    # libLLVM.so/libclang-cpp.so en tiempo de ejecución si no se le fuerza
+    # el RPATH a mano -- con (1)+(2)+(3) ya aplicados, esta vez SÍ hay algo
+    # real en ${LLVM_NATIVE_BUILD}/lib para que el RPATH apunte.
     command -v patchelf >/dev/null 2>&1 \
         || die "falta patchelf en el contenedor -- agregalo al Dockerfile (apt-get install patchelf) y correé 'podman-compose build' de nuevo"
 

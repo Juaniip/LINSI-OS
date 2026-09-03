@@ -1016,7 +1016,8 @@ las Partes 2/3.
   proyecto" (demasiado general, tira control de calidad real que no
   tiene nada que ver con este bug puntual).
 
-- **Décimo octavo error real (2026-09-02/03), corregido -- con elfutils ya
+- **Décimo octavo error real (2026-09-02/03), fix INSUFICIENTE (corregido/
+  completado recién por el Décimo noveno, más abajo) -- con elfutils ya
   completo (Décimo séptimo error), el `meson setup` de Mesa pasó entero
   (`Run-time dependency libelf found: YES 0.191`, 467 build targets) y
   `ninja` llegó a construir 1370/2879 targets, mucho más lejos que en
@@ -1076,16 +1077,135 @@ las Partes 2/3.
   primero (mismo chequeo que ya usa `step_llvm()`). Validado con
   `bash -n` y `shellcheck -S warning -e SC1091` (limpio).
 
-  **Lección:** la lección de `env.sh` ("si una herramienta de build falla
-  con 'error while loading shared libraries', la solución NO es tocar
-  LD_LIBRARY_PATH -- es conseguir una versión genuinamente nativa y
-  apuntarle el RPATH") se sigue cumpliendo incluso cuando la herramienta
-  problemática no es un paquete aparte sino un target intermedio del
-  mismo build -- la solución es la misma (patchelf a la librería nativa
-  real), sólo cambia CUÁNDO se aplica: hace falta un paso de `ninja`
+  **Lección (esta parte sigue siendo válida):** la lección de `env.sh`
+  ("si una herramienta de build falla con 'error while loading shared
+  libraries', la solución NO es tocar LD_LIBRARY_PATH -- es conseguir una
+  versión genuinamente nativa y apuntarle el RPATH") se sigue cumpliendo
+  incluso cuando la herramienta problemática no es un paquete aparte sino
+  un target intermedio del mismo build -- hace falta un paso de `ninja`
   explícito y acotado ANTES del build completo, en vez de un post-build
   único como con `llvm-config`, porque acá el binario se usa DURANTE el
-  resto de la compilación, no después.
+  resto de la compilación, no después. **Lo que este error NO tenía en
+  cuenta (ver Décimo noveno):** el `patchelf --set-rpath` se aplicó
+  limpio, sin ningún error, pero el corte de build volvió a pasar
+  EXACTAMENTE IGUAL en el intento siguiente -- ese fue el motivo real de
+  "che, podés trabajar en serio? porque siguen los mismos faltantes" del
+  usuario. Un fix que corre sin errores no es lo mismo que un fix
+  verificado: faltó comprobar, ANTES de dar el tema por cerrado, que
+  `${LLVM_NATIVE_BUILD}/lib` realmente tuviera algo adentro para que el
+  RPATH apuntara.
+
+- **Décimo noveno error real (2026-09-03), corregido -- mismo error que el
+  Décimo octavo (`mesa_clc: error while loading shared libraries:
+  libLLVM.so.23.1: cannot open shared object file`), IDÉNTICO en el
+  siguiente intento pese al patchelf de RPATH ya aplicado:**
+
+  **Causa raíz real, en dos partes (confirmadas con `readelf -d` y `ldd`
+  reales sobre el `mesa_clc` construido, a pedido explícito -- correr esto
+  no toca el build, sólo lee lo que ya estaba compilado):**
+  ```
+   0x000000000000001d (RUNPATH)  [/lfs/build/llvm-native-build/lib]
+   NEEDED  libLLVM.so.23.1
+   NEEDED  libclang-cpp.so.23.1
+   ...
+  /lib/x86_64-linux-gnu/libstdc++.so.6: version `GLIBCXX_3.4.32' not found
+  /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found
+          libLLVM.so.23.1 => not found
+          libclang-cpp.so.23.1 => not found
+  ```
+  1. `ls -la ${LLVM_NATIVE_BUILD}/lib` mostró que ese directorio, hasta
+     este momento, sólo tenía los `.a` estáticos de `llvm-tblgen`/
+     `llvm-config`/`clang-tblgen` -- CERO `.so`. El RPATH del Décimo
+     octavo apuntaba, sin fallar, a un directorio real pero VACÍO de lo
+     que hacía falta -- de ahí que "corriera sin error" y aun así no
+     sirviera de nada.
+  2. Más de fondo (esto es lo que el Décimo octavo no vio): `mesa_clc`
+     pedía símbolos de glibc/libstdc++ MÁS NUEVOS que los del contenedor
+     (`GLIBC_2.38`, Debian bookworm trae 2.36; `GLIBCXX_3.4.32`, más nueva
+     que la de `build-essential`/gcc-12 de bookworm) -- un choque de
+     VERSIÓN (mismo patrón que `spa-json-dump` en `build-desktop.sh`), no
+     un problema de RPATH, y ningún patchelf lo arregla porque está
+     grabado en el propio código objeto (símbolos versionados que pide el
+     binario). Confirmado leyendo el `meson.build` real de Mesa
+     (`src/compiler/clc/meson.build`, mirror de GitHub `mirror/mesa`):
+     ```
+     native : not meson.can_run_host_binaries(),
+     ```
+     con el comentario real de Mesa arriba: "If we can run host binaries
+     directly, just build mesa_clc for the host. Most commonly this
+     happens when doing a cross compile from an x86_64 build machine to
+     an x86 host". Acá `LFS_TGT` es la MISMA arquitectura que el host
+     (x86_64), así que `can_run_host_binaries()` da `true`, `native` da
+     `false`, y Mesa compila `mesa_clc` con el compilador del
+     **cross-file** (el propio cross-toolchain de Fase 0) en vez del
+     `--native-file` -- exactamente la misma trampa que ya describe
+     "CORREGIDO (2026-08-29)" en `env.sh` para `wayland-scanner`/
+     `glib-compile-resources`, pero acá Mesa la elige a propósito como
+     optimización (asume que un binario del host, misma arquitectura,
+     corre bien directo) -- una asunción válida en un cross-compile típico
+     (host más nuevo que el target embebido) pero FALSA acá, donde el
+     target (`LFS_TGT`) es la glibc RECIÉN compilada, más nueva que la del
+     contenedor. Confirmado también contra el `meson.build` real de la
+     raíz de Mesa: `dep_llvm`/`dep_spirv_tools` se declaran SIN `native:`
+     en ningún lado, así que siempre se resuelven en contexto host/cruzado
+     (vía el `llvm-config` del `--cross-file`) sin importar si el
+     ejecutable que los consume es `native:true` o no -- es el mismo
+     mecanismo real que usa cualquier cross-build de verdad de Mesa (ARM,
+     etc.): `mesa_clc` nativo, pero linkeado igual contra el `dep_llvm`
+     del host/cruzado.
+
+  **Fix, tres partes (`step_llvm_native()` + `step_mesa()` en
+  `build-mesa.sh`):**
+  1. `step_llvm_native()` ahora TAMBIÉN construye los targets de CMake
+     `LLVM` y `clang-cpp` (antes sólo pedía `llvm-tblgen llvm-config
+     clang-tblgen`) -- con `-DCLANG_LINK_CLANG_DYLIB=ON` agregado a su
+     `cmake` (mismo flag que ya usa `step_llvm()` del lado cruzado) y
+     `-DCLANG_TOOL_CLANG_FUZZER_BUILD=OFF` por las dudas (mismo motivo que
+     `step_llvm()`, aunque acá no debería hacer falta al pedir targets
+     puntuales). Esto deja `libLLVM.so`/`libclang-cpp.so` NATIVAS de
+     verdad en `${LLVM_NATIVE_BUILD}/lib`, con verificación explícita
+     (`find ... || die`) de que existan antes de seguir.
+  2. En `src/compiler/clc/meson.build` (fuente de Mesa ya descomprimida),
+     un `sed` idempotente + verificado cambia
+     `native : not meson.can_run_host_binaries(),` por `native : true,`
+     (con cuidado de no "tragarse" la coma final adentro del comentario
+     agregado -- un caso de prueba real confirmó que un primer intento sin
+     esto rompía la sintaxis del `meson.build`). Esto fuerza a `mesa_clc`
+     a compilarse con el compilador NATIVO de punta a punta, eliminando el
+     choque de versión de glibc/libstdc++.
+  3. El `patchelf --set-rpath "${LLVM_NATIVE_BUILD}/lib"` del Décimo
+     octavo se deja tal cual, como red de seguridad -- Meson no siempre
+     agrega un RPATH automático para una dependencia resuelta por
+     config-tool (como `dep_llvm` acá), así que aunque `mesa_clc` ya
+     compile nativo, puede seguir sin encontrar `libLLVM.so`/
+     `libclang-cpp.so` en tiempo de ejecución sin esto -- la diferencia
+     con el Décimo octavo es que esta vez el directorio al que apunta
+     tiene contenido real (parte 1).
+  3 nuevas verificaciones agregadas en `step_mesa()`: falla temprano y
+  claro si `${LLVM_NATIVE_BUILD}/lib` no tiene `libLLVM.so`/
+  `libclang-cpp.so` nativas, y si el `sed` al `meson.build` de Mesa no
+  encontró el texto esperado (evita un fix silencioso a medias si Mesa
+  cambia de versión). Validado con `bash -n` y
+  `shellcheck -S warning -e SC1091` (limpio).
+
+  **Lección:** que un `patchelf`/fix corra sin tirar error no prueba que
+  haya arreglado el problema real -- hay que verificar el resultado
+  (`ldd`, o el propio build volviendo a andar) antes de dar un error por
+  cerrado, más todavía cuando el mensaje de error que sigue apareciendo es
+  IDÉNTICO al de antes: esa repetición exacta es la señal de que el fix
+  anterior no tocó la causa de fondo, no de que "sea el mismo problema de
+  siempre" sin más (acá, de hecho, el build había avanzado muchísimo --
+  1370/2879 antes vs. terminar la fase de compilación entera y llegar al
+  link del binario final ahora -- el mensaje de error idéntico escondía
+  una causa distinta). Separado de eso: cuando una herramienta de
+  build-time que el propio proyecto de terceros compila (no un paquete
+  externo que buscamos) decide sola si compilarse nativa o cruzada según
+  "misma arquitectura = corre directo" (`can_run_host_binaries()`), esa
+  asunción vale para el caso típico de cross-compiling (target más viejo/
+  chico que el host) pero no necesariamente para este proyecto, donde el
+  "target" tiene una glibc más nueva que el propio contenedor de build --
+  hay que estar atento a este patrón en cualquier build de terceros que
+  Mesa/LLVM/otros activen más adelante, no sólo acá.
 
 ## Fase 6 — Parte 3 (no empezada)
 
