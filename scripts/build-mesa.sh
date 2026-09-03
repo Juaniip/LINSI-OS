@@ -1106,6 +1106,58 @@ llvm-config = '${LFS_SYSROOT}/usr/bin/llvm-config'"
         -Dglvnd=disabled \
         -Dgallium-va=disabled
 
+    # Décimo octavo error real (2026-09-0X): con iris/intel_vk habilitados,
+    # Mesa compila mesa_clc (src/compiler/clc/mesa_clc) -- un ejecutable
+    # que corre DURANTE el propio build, invocado directo por ninja, para
+    # traducir shaders internos en OpenCL C (blorp_shaders.cl, etc.) a
+    # SPIR-V. Un `ninja -C "${bdir}" ${MAKEFLAGS}` a secas lo deja reventar
+    # en tiempo de ejecución con "error while loading shared libraries:
+    # libLLVM.so.23.1: cannot open shared object file" -- mismo mecanismo
+    # ya documentado para llvm-config más arriba (ver step_llvm()): Meson
+    # linkea mesa_clc contra el llvm-config que señala el --cross-file
+    # (glslangValidator/llvm-config = "${LFS_SYSROOT}/usr/bin/llvm-config"),
+    # y ese llvm-config -- aunque el binario en sí es NATIVO -- fue
+    # compilado con -DCMAKE_INSTALL_PREFIX="${LFS_SYSROOT}/usr", así que
+    # reporta rutas de link/include DENTRO del sysroot cruzado. mesa_clc
+    # termina apuntando a la libLLVM.so CRUZADA de ${LFS_SYSROOT}/usr/lib,
+    # no a la nativa real de ${LLVM_NATIVE_BUILD}/lib -- y como este
+    # proyecto nunca chrootea a /lfs, el loader real del contenedor no
+    # encuentra esa librería cruzada.
+    #
+    # A diferencia de wayland-scanner/glslangValidator, mesa_clc no se
+    # puede "reconstruir aparte" en un prefix propio: es un target más
+    # dentro del mismo árbol de build de Mesa, generado por el propio
+    # meson.build de Mesa. La solución, siguiendo la misma lección que ya
+    # dejamos escrita en env.sh ("si una herramienta de build falla con
+    # 'error while loading shared libraries', la solución NO es tocar
+    # LD_LIBRARY_PATH -- es conseguir una versión genuinamente nativa"): se
+    # compila primero, en un paso de ninja separado, sólo el/los
+    # ejecutable(s) *_clc (mesa_clc, y cualquier otro con el mismo sufijo
+    # que Mesa 26.2.1 pueda agregar, como intel_clc), y se les corrige el
+    # RPATH con patchelf apuntando a ${LLVM_NATIVE_BUILD}/lib -- la MISMA
+    # libLLVM.so nativa que ya usa llvm-config nativo (ver step_llvm()) --
+    # ANTES de lanzar el resto del build. Ninja no los va a volver a
+    # linkear después (ninguno de sus inputs cambia), así que el RPATH
+    # corregido sobrevive intacto cuando ninja los invoca más adelante para
+    # generar los .spv.
+    command -v patchelf >/dev/null 2>&1 \
+        || die "falta patchelf en el contenedor -- agregalo al Dockerfile (apt-get install patchelf) y correé 'podman-compose build' de nuevo"
+
+    local clc_targets
+    clc_targets="$(ninja -C "${bdir}" -t targets all 2>/dev/null \
+        | awk -F: '{print $1}' | grep -E '/[A-Za-z0-9_]*clc$' || true)"
+    if [[ -n "${clc_targets}" ]]; then
+        log "Ejecutable(s) *_clc detectado(s) en el grafo de Mesa: ${clc_targets//$'\n'/, } -- compilando aparte para corregirles el RPATH antes del build completo"
+        # shellcheck disable=SC2086
+        ninja -C "${bdir}" ${MAKEFLAGS} ${clc_targets}
+        local t
+        while IFS= read -r t; do
+            [[ -n "${t}" && -f "${bdir}/${t}" ]] || continue
+            patchelf --set-rpath "${LLVM_NATIVE_BUILD}/lib" "${bdir}/${t}"
+            log "RPATH corregido (nativo, ${LLVM_NATIVE_BUILD}/lib) en ${t}"
+        done <<< "${clc_targets}"
+    fi
+
     ninja -C "${bdir}" ${MAKEFLAGS}
     DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
 

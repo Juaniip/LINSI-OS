@@ -1016,6 +1016,77 @@ las Partes 2/3.
   proyecto" (demasiado general, tira control de calidad real que no
   tiene nada que ver con este bug puntual).
 
+- **Décimo octavo error real (2026-09-02/03), corregido -- con elfutils ya
+  completo (Décimo séptimo error), el `meson setup` de Mesa pasó entero
+  (`Run-time dependency libelf found: YES 0.191`, 467 build targets) y
+  `ninja` llegó a construir 1370/2879 targets, mucho más lejos que en
+  cualquier intento anterior, antes de romper acá:**
+  ```
+  FAILED: src/intel/blorp/blorp_shaders.spv
+  .../build/src/compiler/clc/mesa_clc -o src/intel/blorp/blorp_shaders.spv ...
+  .../build/src/compiler/clc/mesa_clc: error while loading shared
+    libraries: libLLVM.so.23.1: cannot open shared object file: No such
+    file or directory
+  ninja: build stopped: subcommand failed.
+  ```
+  Consecuencia esperable de que `ninja` frenó a mitad de camino:
+  `verify-mesa` volvió a mostrar TODOS los drivers como `[FALTA]` --
+  igual que antes de este intento, aunque la causa real ya es otra por
+  completo (por eso "siguen los mismos faltantes" en la salida es
+  engañoso: el build llegó muchísimo más lejos que nunca).
+
+  **Causa raíz:** con `iris`/`intel_vk` habilitados, Mesa compila
+  `mesa_clc` (`src/compiler/clc/mesa_clc`) -- un ejecutable que el propio
+  `ninja` invoca EN TIEMPO DE BUILD (no al final) para traducir shaders
+  internos en OpenCL C (`blorp_shaders.cl`, etc.) a SPIR-V. Mismo
+  mecanismo ya documentado para `llvm-config` en `step_llvm()`: el
+  `--cross-file` de Mesa pisa `llvm-config` apuntando a
+  `${LFS_SYSROOT}/usr/bin/llvm-config` -- un binario que, aunque es
+  NATIVO de arquitectura, se compiló con
+  `-DCMAKE_INSTALL_PREFIX="${LFS_SYSROOT}/usr"`, así que reporta rutas de
+  link/include DENTRO del sysroot cruzado. Meson linkea `mesa_clc` contra
+  ESE `llvm-config`, y el binario resultante termina apuntando a la
+  `libLLVM.so` CRUZADA de `${LFS_SYSROOT}/usr/lib` en vez de la nativa
+  real de `${LLVM_NATIVE_BUILD}/lib` -- y como este proyecto nunca
+  chrootea a `/lfs`, el loader real del contenedor no la encuentra. Es el
+  mismo patrón de fondo que "CORREGIDO (2026-08-29)" en `env.sh`
+  (`wayland-scanner`/`glib-compile-resources`: un ejecutable de
+  arquitectura nativa, pero linkeado sin querer contra una librería del
+  sysroot cruzado).
+
+  A diferencia de `wayland-scanner`/`glslangValidator`, `mesa_clc` no se
+  puede reconstruir aparte en un prefix propio -- es un target más
+  dentro del mismo árbol de build de Mesa, generado por el propio
+  `meson.build` de Mesa, no un paquete externo.
+
+  **Fix:** en `step_mesa()`, antes del `ninja -C "${bdir}" ${MAKEFLAGS}`
+  completo, se agregó un paso previo que (a) usa
+  `ninja -C "${bdir}" -t targets all` para listar TODOS los targets del
+  grafo ya generado por `meson setup` y filtra los que terminan en
+  `clc` (cubre `mesa_clc` y cualquier otro ejecutable `*_clc` que Mesa
+  agregue, sin hardcodear el nombre), (b) los compila aparte con
+  `ninja -C "${bdir}" ${MAKEFLAGS} <targets>`, y (c) les corrige el
+  RPATH con `patchelf --set-rpath "${LLVM_NATIVE_BUILD}/lib"` -- la
+  MISMA librería nativa que ya usa `llvm-config` nativo (ver
+  `step_llvm()`, mismo mecanismo, mismo directorio). Recién después de
+  eso se lanza el `ninja -C "${bdir}" ${MAKEFLAGS}` completo: `ninja` no
+  vuelve a linkear esos binarios (ninguno de sus inputs cambió), así que
+  el RPATH corregido sobrevive intacto cuando el resto del build los
+  invoca para generar los `.spv`. Se valida `command -v patchelf`
+  primero (mismo chequeo que ya usa `step_llvm()`). Validado con
+  `bash -n` y `shellcheck -S warning -e SC1091` (limpio).
+
+  **Lección:** la lección de `env.sh` ("si una herramienta de build falla
+  con 'error while loading shared libraries', la solución NO es tocar
+  LD_LIBRARY_PATH -- es conseguir una versión genuinamente nativa y
+  apuntarle el RPATH") se sigue cumpliendo incluso cuando la herramienta
+  problemática no es un paquete aparte sino un target intermedio del
+  mismo build -- la solución es la misma (patchelf a la librería nativa
+  real), sólo cambia CUÁNDO se aplica: hace falta un paso de `ninja`
+  explícito y acotado ANTES del build completo, en vez de un post-build
+  único como con `llvm-config`, porque acá el binario se usa DURANTE el
+  resto de la compilación, no después.
+
 ## Fase 6 — Parte 3 (no empezada)
 
 - **Parte 3 — Qt6 + KDE Frameworks/kwin/plasma-workspace + tema oscuro/Nerd
