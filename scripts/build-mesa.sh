@@ -935,53 +935,48 @@ step_elfutils() {
 
     local src="${LFS_BUILD}/elfutils-${ELFUTILS_VERSION}"
 
-    # PARCHE (Décimo séptimo error real, ver docs/PENDIENTES.md): bug real de
-    # elfutils 0.191, ya arreglado río arriba en versiones posteriores (el
-    # mirror de GitHub del branch principal ya tiene el "const" puesto acá).
-    # libcpu/riscv_disasm.c declara "struct known_csrs *found = bsearch(...)"
-    # SIN const, pero "known" (la tabla de la que busca) es
-    # "static const struct known_csrs known[]" -- el glibc cross-compilado en
-    # este proyecto (Fase 2) da a bsearch un overload const-correcto bajo
-    # _FORTIFY_SOURCE=3 (activo acá, confirmado en el log de configure), que
-    # devuelve "const struct known_csrs *" cuando la base es const. Eso choca
-    # con -Werror=discarded-qualifiers, que este proyecto no eligió -- lo trae
-    # elfutils de fábrica en su propio configure.ac ("CFLAGS ... -Werror" por
-    # cada feature-check, sin ningún --disable-werror que lo apague entero).
-    # No afecta a nada que este proyecto use: es el desensamblador RISC-V, ni
-    # x86_64 ni AMDGPU lo tocan (confirmado: es el ÚNICO archivo de libcpu/
-    # que usa bsearch -- i386_disasm.c/x86_64_disasm.c/bpf_disasm.c no).
-    #
-    # Se aplica con sed (no un patches/*.patch con `patch -p1`) porque no hay
-    # forma de confirmar el whitespace exacto del tarball real sin poder
-    # bajarlo acá (sourceware.org bloqueado en el sandbox, ver VERIFICAR en
-    # env.sh) -- un patch de contexto armado a ciegas se puede rechazar por un
-    # mismatch de tabs/espacios; un sed que sólo toca el fragmento de código
-    # (no la línea entera) no tiene ese problema. Es idempotente: si ya corrió
-    # una vez (re-run sobre el mismo ${LFS_BUILD} persistente), no vuelve a
-    # anteponer "const" una segunda vez.
-    local disasm_file="${src}/libcpu/riscv_disasm.c"
-    if grep -q '^\s*const struct known_csrs \*found = bsearch' "${disasm_file}" 2>/dev/null; then
-        log "riscv_disasm.c ya parcheado (corrida repetida)"
-    elif grep -q 'struct known_csrs \*found = bsearch' "${disasm_file}" 2>/dev/null; then
-        sed -i 's/\(^[[:space:]]*\)struct known_csrs \*found = bsearch/\1const struct known_csrs *found = bsearch/' \
-            "${disasm_file}"
-        log "parche aplicado: riscv_disasm.c (bsearch/const, ver Décimo séptimo error real en docs/PENDIENTES.md)"
-    else
-        die "no encontré la línea a parchear en libcpu/riscv_disasm.c -- ¿cambió elfutils ${ELFUTILS_VERSION}? revisar a mano (ver Décimo séptimo error real en docs/PENDIENTES.md)"
-    fi
-
     local bdir="${src}/build"
     # rm -rf, no sólo mkdir -p: a diferencia de libnftnl/libmnl (que nunca
     # tuvieron una corrida previa fallida acá), esta vez sí puede quedar un
-    # ${bdir} de la corrida que falló por el bug de riscv_disasm.c -- config
-    # limpio en vez de confiar en que make detecte bien el archivo recién
-    # parcheado sobre un Makefile/config.status viejo.
+    # ${bdir} de una corrida anterior que falló a mitad de camino.
     rm -rf "${bdir}"
     mkdir -p "${bdir}"
     cd "${bdir}"
 
+    # CFLAGS=-Wno-error=discarded-qualifiers (Décimo séptimo error real, ver
+    # docs/PENDIENTES.md): bug SISTÉMICO de elfutils 0.191, no de un archivo
+    # puntual -- la primera corrida real rompió en libcpu/riscv_disasm.c
+    # (bsearch sobre una tabla const, variable destino sin const) y, apenas
+    # parcheado ESE archivo a mano, la corrida siguiente rompió en
+    # libdw/dwarf_getsrclines.c con el mismo patrón pero con memchr (3 veces
+    # en ese único archivo). El glibc cross-compilado de este proyecto
+    # (Fase 2) le da a varias funciones de <string.h>/<search.h> (bsearch,
+    # memchr, etc.) overloads const-correctos bajo _FORTIFY_SOURCE=3 (activo
+    # acá, confirmado en el log de configure) que elfutils 0.191 -- escrito
+    # antes de que esos overloads existieran en glibc -- no anticipa, y
+    # `-Werror` (que elfutils trae de fábrica, ver AM_CFLAGS en su
+    # config/eu.am real: "$(if $($(*F)_no_Werror),,-Werror)", sin ningún
+    # --disable-werror que lo apague entero) convierte cada uno en build
+    # roto. Parchear archivo por archivo cada vez que aparece uno nuevo no
+    # escala -- no hay forma de saber cuántos más hay sin correr el build
+    # completo.
+    #
+    # En vez de eso, se apaga sólo ESA clase de warning (no todo -Werror,
+    # que elfutils sigue usando para todo lo demás) agregándola a CFLAGS acá:
+    # confirmado contra config/eu.am real que la regla de compilación de
+    # Automake pone $(AM_CFLAGS) (donde vive el -Werror de elfutils) ANTES
+    # que $(CFLAGS) en la línea real de gcc -- un -Wno-error=<clase> que
+    # aparezca DESPUÉS en la misma línea gana para esa clase puntual,
+    # dejando el resto de los warnings de elfutils como error igual. Se pasa
+    # "-g -O2" también porque autoconf sólo pone esos por default si CFLAGS
+    # viene sin setear -- si nosotros lo seteamos, hay que repetirlos a mano
+    # o se pierden (confirmado contra el configure.ac real: el bloque de
+    # _FORTIFY_SOURCE hace "CFLAGS=\"$fortified_cflags $save_CFLAGS\"", así
+    # que lo que pongamos acá sobrevive completo, con -D_FORTIFY_SOURCE=3
+    # antepuesto).
     PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig" \
     PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
+    CFLAGS="-g -O2 -Wno-error=discarded-qualifiers" \
     ../configure \
         --host="${LFS_TGT}" \
         --build="$(build_triplet)" \

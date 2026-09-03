@@ -922,8 +922,8 @@ las Partes 2/3.
   driver/feature habilitado, no sólo las dependencias que ya se sabía
   que iban a hacer falta.
 - **Décimo séptimo error real (2026-09-02), corregido -- primera corrida
-  real de `step_elfutils()` (fix anterior), rompió compilando `libcpu/`,
-  ni siquiera llegó a `libelf` (que de hecho compiló bien, antes de
+  real de `step_elfutils()` (fix anterior) rompió compilando `libcpu/`,
+  ni siquiera llegó a Mesa (`libelf` de hecho compiló bien, antes de
   `libcpu/` en el orden de `SUBDIRS`):**
   ```
   ../../libcpu/riscv_disasm.c: In function 'riscv_disasm':
@@ -935,59 +935,86 @@ las Partes 2/3.
   cc1: all warnings being treated as errors
   make[2]: *** [Makefile:547: riscv_disasm.o] Error 1
   ```
-  (con las caídas en cascada esperables de `verify-elfutils`, `mesa`
-  -- frenada limpio por la precondición nueva de `step_mesa()`, tal
-  como se diseñó -- y `verify-mesa`: ningún driver de Mesa se llegó a
-  compilar porque Mesa ni arrancó.)
+  Primer intento de fix: un parche de una línea con `sed` a ese archivo
+  puntual (agregar el `const` que faltaba en la declaración de `found`),
+  confirmado contra el mirror de GitHub del branch principal de
+  elfutils que ya tiene esa misma línea arreglada río arriba. Ese parche
+  compiló bien, pero la corrida siguiente (con `libcpu/` ya sin
+  problemas) rompió en otro lado:
+  ```
+  ../../libdw/dwarf_getsrclines.c: In function 'read_srclines':
+  ../../libdw/dwarf_getsrclines.c:332:27: error: initialization discards
+    'const' qualifier from pointer target type
+    [-Werror=discarded-qualifiers]
+    332 |           uint8_t *endp = memchr (dirp, '\0', lineendp - dirp);
+        |                           ^~~~~~
+  [... dos ocurrencias más del mismo patrón en el mismo archivo,
+  líneas 408 y 796 ...]
+  cc1: all warnings being treated as errors
+  make[3]: *** [Makefile:909: dwarf_getsrclines.o] Error 1
+  ```
+  (con las caídas en cascada esperables de `verify-elfutils`, `mesa` --
+  frenada limpio por la precondición de `step_mesa()`, tal como se
+  diseñó -- y `verify-mesa`: ningún driver de Mesa se llegó a compilar
+  porque Mesa ni arrancó.)
 
-  **Causa raíz:** bug real de elfutils 0.191, ya corregido río arriba en
-  versiones posteriores (confirmado contra el mirror de GitHub del
-  branch principal: la misma línea ahí ya tiene `const` puesto). El
-  código de `libcpu/riscv_disasm.c` declara
-  `struct known_csrs *found = bsearch(...)` SIN `const`, pero busca
-  sobre `known`, una tabla `static const struct known_csrs known[]` --
-  y el glibc cross-compilado de este proyecto (Fase 2) le da a `bsearch`
-  un overload const-correcto bajo `_FORTIFY_SOURCE=3` (activo acá,
-  confirmado en el log de `configure`: "checking whether to add
-  -D_FORTIFY_SOURCE=2 or =3 to CFLAGS... yes -D_FORTIFY_SOURCE=3"), que
-  devuelve `const struct known_csrs *` cuando la base es `const` -- y
-  ESO es lo que choca con `-Werror=discarded-qualifiers`, que elfutils
-  trae de fábrica en su propio `configure.ac` (agrega `-Werror` en cada
-  feature-check de compilador, sin ningún `--disable-werror` que lo
-  apague entero -- confirmado, no existe esa opción). No es nada propio
-  de este proyecto ni de la selección de drivers: es el desensamblador
-  de RISC-V, que ni x86_64 ni AMDGPU tocan -- confirmado además que es
-  el ÚNICO archivo de `libcpu/` que usa `bsearch`
-  (`i386_disasm.c`/`x86_64_disasm.c`/`bpf_disasm.c` no lo usan).
+  **Causa raíz:** el mismo bug de fondo en DOS archivos distintos --
+  SISTÉMICO, no un typo puntual en `riscv_disasm.c`. El glibc
+  cross-compilado de este proyecto (Fase 2) le da a varias funciones de
+  `<string.h>`/`<search.h>` (`bsearch`, `memchr`, y probablemente otras
+  que todavía no se tocaron) overloads const-correctos bajo
+  `_FORTIFY_SOURCE=3` (activo acá, confirmado en el log de `configure`:
+  "checking whether to add -D_FORTIFY_SOURCE=2 or =3 to CFLAGS... yes
+  -D_FORTIFY_SOURCE=3") -- devuelven un puntero `const` cuando el
+  argumento de entrada ya es `const`. elfutils 0.191 es de antes de que
+  esos overloads existieran en glibc, así que varios lugares del código
+  asignan ese resultado a una variable sin `const`. Cada uno de esos
+  choca con `-Werror=discarded-qualifiers`, que elfutils trae de
+  fábrica (confirmado contra `config/eu.am` real:
+  `AM_CFLAGS` incluye `$(if $($(*F)_no_Werror),,-Werror)`, sin ningún
+  `--disable-werror` global que lo apague entero). Ninguno de los dos
+  archivos afectados hasta ahora es algo que este proyecto use
+  (`riscv_disasm.c` es el desensamblador RISC-V; `dwarf_getsrclines.c`
+  es DWARF, que tampoco hace falta para `libelf` -- Mesa sólo necesita
+  la librería `libelf` en sí, no `libdw`), pero como es TODO el paquete
+  el que se compila (ver Décimo sexto error real, arriba, y su
+  justificación de por qué no se acota a mano), no alcanza con parchear
+  archivo por archivo cada vez que aparece uno nuevo -- no hay forma de
+  saber cuántos más hay sin correr el build completo primero.
 
-  **Fix real:** `step_elfutils()` ahora aplica un parche de una línea a
-  `libcpu/riscv_disasm.c` antes de compilar (agrega el `const` que
-  faltaba), con un chequeo de idempotencia (para no duplicar "const" si
-  se re-corre el mismo target sobre el mismo `${LFS_BUILD}` persistente)
-  y un `die()` si la línea esperada no aparece (por si una versión
-  futura de elfutils cambia el archivo). Se aplica con `sed` en vez de
-  un `patches/*.patch` con `patch -p1`: no hay forma de confirmar el
-  whitespace exacto (tabs vs espacios) del tarball real sin poder
-  bajarlo desde este sandbox de research (`sourceware.org` bloqueado,
-  ver `VERIFICAR` en `env.sh`) -- un patch de contexto armado a ciegas
-  se puede rechazar por un mismatch de espaciado; un `sed` que sólo
-  reemplaza el fragmento de código puntual (no la línea completa) no
-  tiene ese problema. También se agregó `rm -rf "${bdir}"` antes de
-  reconfigurar (esta corrida sí dejó un `build/` a medio hacer de la
-  corrida que falló, a diferencia de `libnftnl`/`libmnl`, que nunca
-  tuvieron ese caso). Validado con `bash -n` y
+  **Fix real (reemplaza el parche de `riscv_disasm.c` de arriba):** en
+  vez de seguir parchando archivo por archivo, `step_elfutils()` ahora
+  pasa `CFLAGS="-g -O2 -Wno-error=discarded-qualifiers"` al `configure`,
+  apagando SÓLO esa clase de warning (el resto de los `-Werror` de
+  elfutils sigue intacto) para TODO el paquete de una vez. Funciona
+  porque, confirmado contra `config/eu.am` real, la regla de compilación
+  de Automake pone `$(AM_CFLAGS)` (donde vive el `-Werror` de fábrica de
+  elfutils) ANTES que `$(CFLAGS)` en la línea real de `gcc` -- un
+  `-Wno-error=<clase>` que aparece DESPUÉS en la misma línea de comando
+  gana para esa clase puntual, sin tocar el resto. Se agrega `-g -O2`
+  explícito porque autoconf sólo los pone de default si `CFLAGS` viene
+  sin setear desde afuera -- si el proyecto lo setea (como acá), hay que
+  repetirlos a mano o se pierden; confirmado contra el `configure.ac`
+  real que lo que se pase acá sobrevive completo hasta el `Makefile`
+  final (el bloque de detección de `_FORTIFY_SOURCE` hace
+  `CFLAGS="$fortified_cflags $save_CFLAGS"`, anteponiendo
+  `-D_FORTIFY_SOURCE=3` a lo que ya había, sin descartarlo). El parche
+  de una línea a `riscv_disasm.c` se sacó del script (ya no hace falta,
+  este fix lo cubre a él también). Validado con `bash -n` y
   `shellcheck -S warning -e SC1091` (limpio).
 
-  **Lección:** un `-Werror` heredado del propio proyecto de terceros
-  (no algo que este proyecto haya elegido) puede convertir un simple
-  warning de compatibilidad de compilador/libc en un build roto -- y
-  cuando el código roto está en un componente que ni hace falta (acá,
-  el backend RISC-V de un desensamblador multi-arquitectura), vale la
-  pena confirmar primero si el bug ya está arreglado río arriba (research
-  contra el repo real, no asumir) antes de considerar deshabilitar el
-  componente entero o bajar el nivel de warnings del proyecto completo
-  -- un parche de una línea, acotado al bug puntual, es menos riesgoso
-  que cualquiera de esas dos alternativas más generales.
+  **Lección:** cuando un `-Werror` heredado de un proyecto de terceros
+  (no algo que este proyecto haya elegido) rompe por el mismo patrón de
+  incompatibilidad compilador/libc en MÁS DE UN archivo, no conviene
+  seguir la misma respuesta puntual del primer error (un parche de una
+  línea) para el segundo -- esa repetición es la señal de que el bug es
+  sistémico, y ahí conviene apagar la clase de warning específica en vez
+  de perseguir cada archivo nuevo build tras build. Apagar sólo esa
+  clase (no todo `-Werror`) mantiene el resto del control de calidad de
+  elfutils intacto -- es un punto intermedio entre "parchear cada
+  archivo a mano" (no escala) y "bajar todos los warnings a nivel
+  proyecto" (demasiado general, tira control de calidad real que no
+  tiene nada que ver con este bug puntual).
 
 ## Fase 6 — Parte 3 (no empezada)
 
