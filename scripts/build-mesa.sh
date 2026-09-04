@@ -1268,6 +1268,7 @@ step_mesa_clc_native() {
 
     local src="${LFS_BUILD}/mesa-mesa-${MESA_VERSION}"
     [[ -d "${src}" ]] || die "no se extrajo Mesa en ${src}"
+    cd "${src}"
 
     local nativefile="${LFS_BUILD}/meson-native-mesaclc-linsi.ini"
     cat > "${nativefile}" <<EOF
