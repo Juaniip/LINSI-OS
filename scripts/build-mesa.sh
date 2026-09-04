@@ -1319,6 +1319,36 @@ EOF
     rm -rf "${bdir}"
     rm -rf "${MESA_CLC_NATIVE_INSTALL}"
 
+    # Vigésimo segundo error real (2026-09-04): con lo anterior ya andando,
+    # mesa_clc NATIVO compiló, se instaló, y el build CRUZADO real de Mesa lo
+    # invocó de verdad (1366/2872 targets, compilando
+    # src/intel/blorp/blorp_shaders.cl a SPIR-V) -- pero ahí rompió en
+    # tiempo de EJECUCIÓN de mesa_clc, no de compilación:
+    #   <built-in>:439:10: fatal error: 'opencl-c-base.h' file not found
+    # Causa raíz (confirmada leyendo src/compiler/clc/meson.build real
+    # completo, ya citado más arriba en este archivo): Mesa tiene DOS
+    # estrategias para que mesa_clc encuentre sus headers de OpenCL-C
+    # (opencl-c-base.h/opencl-c.h, que clang necesita para compilar
+    # `-cl-std=cl2.0`): (a) "bundled" -- los empaqueta ADENTRO del binario
+    # en tiempo de compilación (vía xxd, activado con
+    # `-DUSE_STATIC_OPENCL_C_H=1`) cuando `not _shared_llvm` o
+    # `-Dmesa-clc-bundle-headers=enabled`; o (b) "runtime" (default si LLVM
+    # es compartida, que es nuestro caso) -- los busca en disco en
+    # `<LLVM_LIB_DIR>/clang/<version>/include/`, una ruta armada en base al
+    # `llvm_libdir` que reporta `llvm-config` en tiempo de compilación de
+    # mesa_clc. Ese directorio (`${LLVM_NATIVE_BUILD}/lib/clang/23/
+    # include/`) nunca lo generamos -- `step_llvm_native()` sólo pide
+    # targets puntuales de CMake (`llvm-tblgen llvm-config clang-tblgen LLVM
+    # clang-cpp`), ninguno de los cuales copia/genera el "resource
+    # directory" de headers builtin de Clang.
+    # Fix: en vez de perseguir qué target de CMake genera ese directorio
+    # (frágil, ligado a la estructura interna de Clang), se fuerza el modo
+    # (a) -- `-Dmesa-clc-bundle-headers=enabled` -- que empaqueta los
+    # headers DENTRO del binario mesa_clc en tiempo de compilación: cero
+    # dependencia de rutas en disco en tiempo de ejecución, exactamente lo
+    # que hace falta para un binario NATIVO pre-compilado que se usa desde
+    # OTRO build (el cruzado) donde ni siquiera existe ${LLVM_NATIVE_BUILD}
+    # en el mismo contexto de resolución de rutas relativas.
     CFLAGS="-isystem ${clang_src_include} -isystem ${clang_build_include}" \
     CXXFLAGS="-isystem ${clang_src_include} -isystem ${clang_build_include}" \
     meson setup "${bdir}" \
@@ -1330,6 +1360,7 @@ EOF
         -Dgallium-drivers= \
         -Dvulkan-drivers= \
         -Dmesa-clc=enabled \
+        -Dmesa-clc-bundle-headers=enabled \
         -Dinstall-mesa-clc=true
 
     ninja -C "${bdir}" ${MAKEFLAGS}

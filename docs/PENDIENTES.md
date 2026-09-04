@@ -1406,6 +1406,59 @@ las Partes 2/3.
   árbol de build) los destapa -- no alcanza con mirar qué dependencias
   declara el `meson.build`, hay que fijarse CÓMO las resuelve cada una.
 
+- **Vigésimo segundo error real (2026-09-04), corregido -- primera vez que
+  mesa_clc NATIVO corre DE VERDAD, invocado por el build cruzado real de
+  Mesa (1366/2872 targets, confirma que todo el fix del Vigésimo error real
+  funciona en la práctica, no sólo en teoría):**
+
+  ```
+  /lfs/build/mesa-clc-native-install/bin/mesa_clc -o
+  src/intel/blorp/blorp_shaders.spv ... ../src/intel/blorp/blorp_shaders.cl
+  -- ... -cl-std=cl2.0 ...
+  <built-in>:439:10: fatal error: 'opencl-c-base.h' file not found
+  ```
+
+  **Causa raíz** (confirmada releyendo `src/compiler/clc/meson.build` real
+  completo, ya citado en el Vigésimo error real más arriba): Mesa tiene DOS
+  estrategias para que `mesa_clc` encuentre sus headers de OpenCL-C
+  (`opencl-c-base.h`/`opencl-c.h`, que Clang necesita para compilar código
+  `-cl-std=cl2.0`):
+  1. **"Bundled"**: los empaqueta ADENTRO del binario en tiempo de
+     compilación (vía `xxd`, con `-DUSE_STATIC_OPENCL_C_H=1`) -- se activa
+     solo si `not _shared_llvm`, o a mano con
+     `-Dmesa-clc-bundle-headers=enabled` (confirmado en `meson.options`:
+     *"Bundle the OpenCL headers into the mesa-clc binary (default to
+     bundle if static LLVM is used)"*).
+  2. **"Runtime"** (lo que nos tocó, LLVM nativo es compartida): los busca
+     en disco en `<LLVM_LIB_DIR>/clang/<version>/include/`, ruta armada en
+     base al `llvm_libdir` que reporta `llvm-config` en tiempo de
+     compilación de `mesa_clc`. Ese directorio
+     (`${LLVM_NATIVE_BUILD}/lib/clang/23/include/`) nunca se generó --
+     `step_llvm_native()` sólo pide targets puntuales de CMake
+     (`llvm-tblgen llvm-config clang-tblgen LLVM clang-cpp`), ninguno de
+     los cuales copia/genera el "resource directory" de headers builtin de
+     Clang.
+
+  **Fix** (`step_mesa_clc_native()`): en vez de perseguir qué target de
+  CMake genera ese directorio (frágil, ligado a la estructura interna de
+  Clang, mismo tipo de fragilidad que ya costó dos rondas con LLVM en el
+  Décimo quinto error real), se fuerza la estrategia 1 con
+  `-Dmesa-clc-bundle-headers=enabled` -- cero dependencia de rutas en disco
+  en tiempo de ejecución, apropiado para un binario NATIVO pre-compilado
+  que se usa desde OTRO build (el cruzado) donde ni siquiera existe
+  `${LLVM_NATIVE_BUILD}` en el mismo contexto de resolución de rutas.
+
+  Validado con `bash -n` y `shellcheck -S warning -e SC1091` (limpio).
+
+  **Lección:** cuando una herramienta de build-time se va a usar
+  desacoplada de su propio entorno de compilación (acá: `mesa_clc`
+  compilado en un build nativo aparte, después invocado desde un build
+  cruzado distinto), conviene preferir la opción que empaqueta sus recursos
+  ADENTRO del binario en vez de la que los busca por ruta relativa en
+  tiempo de ejecución -- la segunda asume que el binario sigue viviendo
+  "cerca" de donde se compiló, una asunción que ya rompió dos veces en este
+  mismo tramo del proyecto (RPATH de LLVM, ahora esto).
+
 ## Fase 6 — Parte 3 (no empezada)
 
 - **Parte 3 — Qt6 + KDE Frameworks/kwin/plasma-workspace + tema oscuro/Nerd
