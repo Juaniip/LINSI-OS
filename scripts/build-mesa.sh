@@ -519,7 +519,28 @@ step_llvm_native() {
         -DCLANG_TOOL_CLANG_FUZZER_BUILD=OFF \
         "${LLVM_CMAKE_COMMON_FLAGS[@]}"
 
-    ninja -C "${LLVM_NATIVE_BUILD}" ${MAKEFLAGS} llvm-tblgen llvm-config clang-tblgen LLVM clang-cpp
+    # Vigésimo tercer error real (2026-09-04): además de llvm-tblgen/
+    # llvm-config/clang-tblgen/LLVM/clang-cpp, hace falta el target de CMake
+    # "clang-resource-headers" -- confirmado contra
+    # clang/lib/Headers/CMakeLists.txt real (llvm-project, rama main):
+    # `add_library(clang-resource-headers INTERFACE ${out_files})`, con
+    # `opencl_files` (opencl-c.h, opencl-c-base.h) entre los headers que
+    # copia, en `lib/clang/<version>/include/` relativo al directorio de
+    # build (vía `get_clang_resource_dir()`). Sin este target ese
+    # directorio no existe -- ninguno de los otros 5 targets lo genera como
+    # efecto secundario. Esto lo destapó `-Dmesa-clc-bundle-headers=enabled`
+    # (Vigésimo segundo error real) al fallar en tiempo de CONFIGURE de
+    # Meson, no de compilación:
+    #   src/compiler/clc/meson.build:25:20: ERROR: File
+    #   .../llvm-native-build/lib/clang/23/include/opencl-c-base.h does not
+    #   exist.
+    # -- pero el gap era el mismo de fondo con el modo "runtime" (Vigésimo
+    # segundo, antes de forzar el bundling): ese directorio tampoco existía
+    # ahí, sólo que el error salía más tarde (al ejecutar mesa_clc) en vez
+    # de en el configure. Bundling sigue siendo la estrategia correcta
+    # (Vigésimo segundo error real) -- lo que faltaba era generar el
+    # directorio de origen que ambos modos necesitan.
+    ninja -C "${LLVM_NATIVE_BUILD}" ${MAKEFLAGS} llvm-tblgen llvm-config clang-tblgen LLVM clang-cpp clang-resource-headers
 
     [[ -x "${LLVM_TABLEGEN_NATIVE}" ]] || die "no se compiló llvm-tblgen nativo"
     [[ -x "${LLVM_NATIVE_BUILD}/bin/llvm-config" ]] || die "no se compiló llvm-config nativo"
@@ -528,7 +549,9 @@ step_llvm_native() {
         || die "no se compiló libLLVM.so nativa en ${LLVM_NATIVE_BUILD}/lib -- ¿el target 'LLVM' de CMake cambió de nombre?"
     find "${LLVM_NATIVE_BUILD}/lib" -maxdepth 1 -name 'libclang-cpp.so*' 2>/dev/null | grep -q . \
         || die "no se compiló libclang-cpp.so nativa en ${LLVM_NATIVE_BUILD}/lib -- ¿el target 'clang-cpp' de CMake cambió de nombre?"
-    log "LLVM+Clang nativos listos: llvm-tblgen en ${LLVM_TABLEGEN_NATIVE}, clang-tblgen en ${CLANG_TABLEGEN_NATIVE}, libLLVM.so + libclang-cpp.so en ${LLVM_NATIVE_BUILD}/lib"
+    find "${LLVM_NATIVE_BUILD}/lib/clang" -mindepth 3 -maxdepth 3 -name 'opencl-c-base.h' 2>/dev/null | grep -q . \
+        || die "no se generó opencl-c-base.h en ${LLVM_NATIVE_BUILD}/lib/clang/*/include -- ¿el target 'clang-resource-headers' de CMake cambió de nombre o de ruta de salida?"
+    log "LLVM+Clang nativos listos: llvm-tblgen en ${LLVM_TABLEGEN_NATIVE}, clang-tblgen en ${CLANG_TABLEGEN_NATIVE}, libLLVM.so + libclang-cpp.so + resource headers (opencl-c*.h) en ${LLVM_NATIVE_BUILD}/lib"
 }
 
 step_llvm() {

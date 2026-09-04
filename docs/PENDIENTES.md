@@ -242,7 +242,19 @@ las Partes 2/3.
   arriesgar un "Unknown option" adivinando. Si falta alguna funcionalidad más
   adelante, revisar ahí primero.
 
-## Fase 6 — Parte 2 (Mesa + LLVM, drivers gráficos) — 🟡 script escrito, SIN CORRER TODAVÍA (2026-08-29)
+## Fase 6 — Parte 2 (Mesa + LLVM, drivers gráficos) — 🟡 EN CURSO, corriendo de verdad (actualizado 2026-09-04)
+
+Este título decía "script escrito, SIN CORRER TODAVÍA" desde el 2026-08-29 --
+quedó desactualizado, corregido ahora: llevamos varios días CORRIENDO el
+build real contra hardware/contenedor real, no iterando en el aire. La
+extensión de la sección de "errores reales" de acá abajo (23 entradas a esta
+fecha) es justamente el registro de esas corridas reales, no trabajo
+especulativo -- son los errores concretos que tira el build real, cada uno
+con su causa raíz confirmada contra la fuente real de Mesa/LLVM antes de
+tocar nada, no parches a ciegas. La gran mayoría ya están cerrados; sólo dos
+tramos tuvieron que corregirse a sí mismos después de resultar incompletos
+(Décimo octavo→Décimo noveno, y Décimo noveno parte 2→Vigésimo) -- señalado
+explícito en cada caso, no escondido.
 
 - **Script nuevo:** `scripts/build-mesa.sh` (independiente de
   `build-desktop.sh`, mismo patrón de siempre: se basta a sí mismo, no
@@ -1458,6 +1470,52 @@ las Partes 2/3.
   tiempo de ejecución -- la segunda asume que el binario sigue viviendo
   "cerca" de donde se compiló, una asunción que ya rompió dos veces en este
   mismo tramo del proyecto (RPATH de LLVM, ahora esto).
+
+- **Vigésimo tercer error real (2026-09-04), corregido -- consecuencia
+  directa del fix del Vigésimo segundo (forzar
+  `-Dmesa-clc-bundle-headers=enabled`), esta vez a tiempo de CONFIGURE de
+  Meson, no de ejecución:**
+
+  ```
+  src/compiler/clc/meson.build:25:20: ERROR: File
+  /lfs/build/llvm-native-build/lib/clang/23/include/opencl-c-base.h does
+  not exist.
+  ```
+
+  **Causa raíz**: el gap real no era "runtime vs. bundled" (esa parte del
+  Vigésimo segundo fix era correcta) -- era que
+  `${LLVM_NATIVE_BUILD}/lib/clang/23/include/` **nunca se generó**, ni con
+  la estrategia runtime (ahí el error salía recién al ejecutar `mesa_clc`,
+  más tarde y más críptico) ni con la bundled (acá, Meson necesita LEER el
+  archivo en el propio `meson setup` para empaquetarlo, así que el mismo
+  gap aparece antes, en el configure). `step_llvm_native()` sólo pedía 5
+  targets puntuales de CMake (`llvm-tblgen llvm-config clang-tblgen LLVM
+  clang-cpp`) -- ninguno genera ese directorio como efecto secundario.
+  Confirmado contra `clang/lib/Headers/CMakeLists.txt` real
+  (`llvm-project`, rama `main`): el target real se llama
+  **`clang-resource-headers`** (`add_library(clang-resource-headers
+  INTERFACE ${out_files})`), con `opencl-c.h`/`opencl-c-base.h` entre los
+  headers que copia a `lib/clang/<version>/include/` (vía
+  `get_clang_resource_dir()`) -- exactamente la ruta que pedía Meson.
+
+  **Fix**: agregar `clang-resource-headers` a la lista de targets de
+  `ninja` en `step_llvm_native()`, más una verificación nueva
+  (`find ... opencl-c-base.h`) antes de dar el paso por bueno. Con esto ya
+  no hace falta re-pensar la estrategia bundled-vs-runtime del Vigésimo
+  segundo -- sigue siendo la correcta, sólo le faltaba el directorio de
+  origen.
+
+  Validado con `bash -n` y `shellcheck -S warning -e SC1091` (limpio).
+
+  **Lección:** un build de CMake con targets puntuales (en vez de "ninja"
+  a secas) no arma automáticamente TODO lo que un consumidor final va a
+  necesitar -- cada target nuevo que se agrega río abajo (acá:
+  `-Dmesa-clc-bundle-headers=enabled`) puede destapar que faltaba un target
+  más arriba que nadie pidió todavía. No es un fix mal hecho ni señal de
+  que el enfoque esté mal -- es el costo normal de pedir sólo lo que hace
+  falta en vez de compilar LLVM+Clang completos (que sí tardan horas): cada
+  gap se cierra en segundos (agregar un target a una lista existente), no
+  en horas (no hace falta recompilar nada de lo ya hecho, sólo lo nuevo).
 
 ## Fase 6 — Parte 3 (no empezada)
 
