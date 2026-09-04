@@ -1350,6 +1350,62 @@ las Partes 2/3.
   Mesa para cross-compiling (`docs.mesa3d.org/android.html`) ya trae la
   receta completa, no hizo falta inventar nada.
 
+- **Vigésimo primer error real (2026-09-04), corregido -- primer error real
+  de COMPILACIÓN (no de configure) del build `mesa-clc-native` nuevo del
+  Vigésimo error real, llegó hasta 375/390 targets antes de romper:**
+
+  ```
+  ../mesa-mesa-26.2.1/src/compiler/clc/clc_helpers.cpp:45:10: fatal error:
+  clang/Config/config.h: No such file or directory
+     45 | #include <clang/Config/config.h>
+  ```
+
+  **Causa raíz** (confirmada leyendo la línea de compilación completa real
+  del log): Mesa resuelve `dep_clang` con
+  `cpp.find_library('clang-cpp', dirs: llvm_libdir, required: false)` --un
+  `find_library()` puro, que sólo aporta el flag de LINKEO contra
+  `libclang-cpp.so`, nunca include dirs (a diferencia de `dep_llvm`, que sí
+  es un `dependency('llvm', method: 'config-tool', ...)` completo y por eso
+  sí aporta sus propios `-isystem`: la línea de compilación real tenía
+  `-isystem .../llvm-project-23.1.0.src/llvm/include -isystem .../llvm-
+  native-build/include` -- dos rutas, las dos de LLVM, CERO de Clang). En
+  el build CRUZADO esto no se nota porque LLVM+Clang quedan instalados
+  COMPLETOS en `${LFS_SYSROOT}/usr` (Fase 6 normal) -- los headers de
+  Clang caen en una ruta de include estándar del sysroot, sin hacer falta
+  ningún `-I` explícito. En el build `mesa-clc-native` nuevo, en cambio,
+  LLVM+Clang nativos nunca se instalan (se usan directo desde su árbol de
+  build, `step_llvm_native()` nunca corre `ninja install`) -- sus headers
+  no están en ningún include path por default, y como `dep_clang` no
+  aporta ninguno, el compilador no tiene forma de encontrarlos.
+
+  **Fix** (`step_mesa_clc_native()`): agregar a mano, vía `CFLAGS`/
+  `CXXFLAGS` en el propio `meson setup` (mismo mecanismo que ya usa
+  `step_elfutils()`, Meson lo graba como flags base del proyecto en tiempo
+  de configure), las mismas dos rutas que Meson ya arma solo para LLVM,
+  pero del lado de Clang: `<llvm-project fuente>/clang/include` (headers
+  públicos normales) y `${LLVM_NATIVE_BUILD}/tools/clang/include`
+  (headers generados por CMake en tiempo de configure -- éste
+  `clang/Config/config.h` entre ellos -- bajo el layout estándar del
+  monorepo LLVM, donde cada "tool" agregado vía `LLVM_ENABLE_PROJECTS`
+  arma su propio árbol de build reflejando su árbol de fuente; mismo
+  patrón que `${LLVM_NATIVE_BUILD}/include` para los generados de LLVM
+  mismo). Dos verificaciones nuevas antes de tocar Meson: que el
+  directorio fuente exista, y que `clang/Config/config.h` realmente esté
+  generado en el árbol de build nativo (evita repetir el error de forma
+  más críptica si la estructura de LLVM cambia de versión).
+
+  Validado con `bash -n` y `shellcheck -S warning -e SC1091` (limpio).
+
+  **Lección:** no todas las `dependency()`/`find_library()` de un
+  `meson.build` de terceros aportan lo mismo -- un `find_library()` sólo
+  linkea, nunca agrega include dirs, a diferencia de una `dependency()`
+  completa (pkg-config o config-tool). Cuando un build cruzado "esconde"
+  este tipo de gaps porque todo termina instalado en una ruta de include
+  estándar del sysroot, un build NATIVO aparte (como el `mesa-clc-native`
+  de este proyecto, que a propósito usa binarios sin instalar desde su
+  árbol de build) los destapa -- no alcanza con mirar qué dependencias
+  declara el `meson.build`, hay que fijarse CÓMO las resuelve cada una.
+
 ## Fase 6 — Parte 3 (no empezada)
 
 - **Parte 3 — Qt6 + KDE Frameworks/kwin/plasma-workspace + tema oscuro/Nerd

@@ -1270,6 +1270,42 @@ step_mesa_clc_native() {
     [[ -d "${src}" ]] || die "no se extrajo Mesa en ${src}"
     cd "${src}"
 
+    # Vigésimo primer error real (2026-09-04): con lo anterior ya andando,
+    # `_libmesaclc` (src/compiler/clc/clc_helpers.cpp) rompe en compilación
+    # (no en configure) con:
+    #   clc_helpers.cpp:45:10: fatal error: clang/Config/config.h: No such
+    #   file or directory
+    # Causa raíz: `dep_clang` en Mesa se resuelve con
+    # `cpp.find_library('clang-cpp', dirs: llvm_libdir, ...)` -- un
+    # find_library() puro, que sólo aporta el flag de LINKEO contra
+    # libclang-cpp.so, NUNCA include dirs (a diferencia de `dep_llvm`, que sí
+    # es un `dependency('llvm', method: 'config-tool', ...)` completo y por
+    # eso aporta sus propios `-isystem` -- confirmado en el log real:
+    # `-isystem.../llvm-project-23.1.0.src/llvm/include -isystem.../llvm-
+    # native-build/include`, dos rutas, ambas de LLVM, CERO de Clang). En el
+    # build CRUZADO esto no se nota porque LLVM+Clang quedan instalados
+    # completos en ${LFS_SYSROOT}/usr -- los headers de clang caen en una
+    # ruta de include ESTÁNDAR del sysroot, sin hacer falta ningún -I
+    # explícito. Acá, en cambio, LLVM+Clang nativos nunca se instalan (se
+    # usan directo desde su árbol de build, sin "ninja install") -- sus
+    # headers no están en ningún include path por default.
+    # Fix: agregar a mano las mismas DOS rutas que Meson ya arma solo para
+    # LLVM, pero del lado de Clang -- fuente (headers públicos normales,
+    # `clang/include`) y árbol de build NATIVO (headers generados por CMake
+    # en tiempo de configure, como este mismo `clang/Config/config.h`, bajo
+    # `tools/clang/include` -- mismo layout estándar del monorepo LLVM que
+    # ya usa ${LLVM_NATIVE_BUILD}/include para los generados de LLVM).
+    # CFLAGS/CXXFLAGS en el propio `meson setup` (no en el native-file):
+    # mismo mecanismo que ya usa step_elfutils() más arriba -- Meson graba
+    # esto como flags base del proyecto en tiempo de configure.
+    local llvm_native_src="${LFS_BUILD}/llvm-project-${LLVM_VERSION}.src"
+    local clang_src_include="${llvm_native_src}/clang/include"
+    local clang_build_include="${LLVM_NATIVE_BUILD}/tools/clang/include"
+    [[ -d "${clang_src_include}" ]] \
+        || die "no está ${clang_src_include} -- ¿cambió la estructura de directorios de LLVM ${LLVM_VERSION}?"
+    [[ -f "${clang_build_include}/clang/Config/config.h" ]] \
+        || die "no está ${clang_build_include}/clang/Config/config.h -- ¿el target 'clang-cpp' de step_llvm_native() no generó los headers de Clang, o cambió su ruta de build?"
+
     local nativefile="${LFS_BUILD}/meson-native-mesaclc-linsi.ini"
     cat > "${nativefile}" <<EOF
 [binaries]
@@ -1283,6 +1319,8 @@ EOF
     rm -rf "${bdir}"
     rm -rf "${MESA_CLC_NATIVE_INSTALL}"
 
+    CFLAGS="-isystem ${clang_src_include} -isystem ${clang_build_include}" \
+    CXXFLAGS="-isystem ${clang_src_include} -isystem ${clang_build_include}" \
     meson setup "${bdir}" \
         --native-file="${nativefile}" \
         --prefix="${MESA_CLC_NATIVE_INSTALL}" \
