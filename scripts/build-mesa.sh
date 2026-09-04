@@ -99,23 +99,34 @@
 # pero sin poder correr nada en vivo hasta que tiren el build real.
 #
 # Orden (cada paso depende del anterior):
-#   1. libdrm                  -> bindings de espacio de usuario al DRM/GEM
-#   2. llvm-native              -> build NATIVO (llvm-tblgen + llvm-config +
+#   1. libdrm                    -> bindings de espacio de usuario al DRM/GEM
+#   2. llvm-native                -> build NATIVO (llvm-tblgen + llvm-config +
 #                                  clang-tblgen + libLLVM.so + libclang-cpp.so
 #                                  NATIVAS, éstas últimas para mesa_clc --
-#                                  ver Décimo noveno error real), no se
-#                                  instala nada del sistema final con esto
-#   3. llvm                     -> build CRUZADO real (libLLVM + libclang-cpp
+#                                  ver Décimo noveno/Vigésimo error real), no
+#                                  se instala nada del sistema final con esto
+#   3. llvm                       -> build CRUZADO real (libLLVM + libclang-cpp
 #                                  + headers), el que efectivamente queda en
 #                                  el sysroot
-#   4. glslang-native            -> glslangValidator NATIVO (Mesa >= 12.2)
-#   5. spirv-headers             -> sólo headers/gramática, dos checkouts
+#   4. glslang-native              -> glslangValidator NATIVO (Mesa >= 12.2)
+#   5. spirv-headers               -> sólo headers/gramática, dos checkouts
 #                                  (uno por consumidor, ver env.sh)
-#   6. spirv-tools               -> cruzado, provee SPIRV-Tools.pc
-#   7. spirv-llvm-translator     -> cruzado, provee LLVMSPIRVLib.pc
-#   8. mesa                      -> los drivers en sí, usa libdrm + LLVM +
+#   6. spirv-tools                 -> cruzado, provee SPIRV-Tools.pc
+#   6b. spirv-tools-native          -> NATIVO, lo necesita mesa_clc NATIVO
+#                                  del paso 7c (ver Vigésimo error real)
+#   7. spirv-llvm-translator       -> cruzado, provee LLVMSPIRVLib.pc
+#   7b. spirv-llvm-translator-native -> NATIVO, idem 6b
+#   7c. mesa-clc-native             -> mesa_clc + vtn_bindgen2 100% NATIVOS,
+#                                  build de Mesa aparte con drivers vacíos
+#                                  (Vigésimo error real -- reemplaza el
+#                                  intento de forzar native:true a mano
+#                                  adentro del build cruzado, Décimo noveno
+#                                  parte 2, revertido)
+#   8. mesa                        -> los drivers en sí, usa libdrm + LLVM +
 #                                  clang + SPIRV-Tools + LLVMSPIRVLib + el
-#                                  wayland-scanner nativo de la Parte 1
+#                                  wayland-scanner nativo de la Parte 1 +
+#                                  mesa_clc/vtn_bindgen2 NATIVOS (-Dmesa-clc=
+#                                  system) del paso 7c
 #
 # Uso:
 #   scripts/build-mesa.sh libdrm
@@ -822,6 +833,58 @@ step_verify_spirv_tools() {
 }
 
 # ------------------------------------------------------------------------------
+# 6b) SPIRV-Tools NATIVO — CMake, build NATIVO (sin --cross-file, sin
+# sysroot). Vigésimo error real (2026-09-04): hace falta para el mesa_clc
+# NATIVO de la sección "7c" más abajo — ver el comentario grande ahí sobre
+# por qué mesa_clc no puede seguir compilándose con native:true a mano
+# adentro del build CRUZADO de Mesa (Décimo noveno parte 2, revertido en
+# este mismo commit). Mismos flags de CMake que la versión cruzada
+# (step_spirv_tools()) salvo que acá no hay --cross-file/toolchain
+# (compilador nativo del propio contenedor) y el --prefix es un directorio
+# de build-tools cualquiera bajo ${LFS_BUILD}, NUNCA ${LFS_SYSROOT} — esto
+# no se instala en el sysroot final, es sólo una herramienta de build-time
+# (mismo patrón que glslang-native).
+# ------------------------------------------------------------------------------
+SPIRV_TOOLS_NATIVE_INSTALL="${LFS_BUILD}/spirv-tools-native-install"
+
+step_spirv_tools_native() {
+    if [[ -f "${SPIRV_TOOLS_NATIVE_INSTALL}/lib/pkgconfig/SPIRV-Tools.pc" ]]; then
+        log "SPIRV-Tools NATIVO ya compilado en ${SPIRV_TOOLS_NATIVE_INSTALL}"
+        return 0
+    fi
+    [[ -d "${SPIRV_HEADERS_FOR_TOOLS_DIR}" ]] \
+        || die "no está SPIRV-Headers para SPIRV-Tools -- corré primero: scripts/build-mesa.sh spirv-headers"
+
+    log "SPIRV-Tools ${SPIRV_TOOLS_VERSION} NATIVO — CMake+Ninja"
+
+    cd "${LFS_SOURCES}"
+    fetch "${SPIRV_TOOLS_MIRROR}/v${SPIRV_TOOLS_VERSION}.tar.gz" "spirv-tools-${SPIRV_TOOLS_VERSION}.tar.gz"
+    log_sha256 "${LFS_SOURCES}/spirv-tools-${SPIRV_TOOLS_VERSION}.tar.gz"
+    extract_once "${LFS_SOURCES}/spirv-tools-${SPIRV_TOOLS_VERSION}.tar.gz" \
+                 "${LFS_BUILD}/.extracted-spirv-tools"
+
+    local src="${LFS_BUILD}/SPIRV-Tools-${SPIRV_TOOLS_VERSION}"
+    [[ -d "${src}" ]] || die "no se extrajo SPIRV-Tools en ${src}"
+
+    local bdir="${LFS_BUILD}/spirv-tools-native-build"
+    rm -rf "${bdir}"
+
+    cmake -S "${src}" -B "${bdir}" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="${SPIRV_TOOLS_NATIVE_INSTALL}" \
+        -DSPIRV-Headers_SOURCE_DIR="${SPIRV_HEADERS_FOR_TOOLS_DIR}" \
+        -DSPIRV_SKIP_EXECUTABLES=ON \
+        -DSPIRV_WERROR=OFF
+
+    ninja -C "${bdir}" ${MAKEFLAGS}
+    ninja -C "${bdir}" install
+
+    [[ -f "${SPIRV_TOOLS_NATIVE_INSTALL}/lib/pkgconfig/SPIRV-Tools.pc" ]] \
+        || die "no se instaló SPIRV-Tools.pc NATIVO en ${SPIRV_TOOLS_NATIVE_INSTALL}/lib/pkgconfig"
+    log "SPIRV-Tools NATIVO listo en ${SPIRV_TOOLS_NATIVE_INSTALL}"
+}
+
+# ------------------------------------------------------------------------------
 # 7) SPIRV-LLVM-Translator — CMake, build CRUZADO, standalone (fuera del
 # árbol de llvm-project, apuntando al LLVM ya cruzado e instalado en el
 # sysroot vía -DLLVM_DIR). Provee libLLVMSPIRVLib + el LLVMSPIRVLib.pc que
@@ -897,6 +960,64 @@ step_verify_spirv_llvm_translator() {
     fi
     [[ "${ok}" -eq 1 ]] || die "falta SPIRV-LLVM-Translator en el sysroot"
     log "OK: SPIRV-LLVM-Translator completo en el sysroot."
+}
+
+# ------------------------------------------------------------------------------
+# 7b) SPIRV-LLVM-Translator NATIVO — CMake, build NATIVO, standalone, apunta
+# al LLVM NATIVO (${LLVM_NATIVE_BUILD}) SIN instalarlo -- LLVM genera su
+# LLVMConfig.cmake de "build tree" apenas corre el cmake configure, sin
+# hacer falta ningún "ninja install" (mecanismo estándar y documentado de
+# LLVM/CMake para poder usar un LLVM recién compilado antes de instalarlo --
+# confirmado contra el comportamiento real de AddLLVM.cmake/
+# LLVMConfig.cmake.in del propio LLVM, 2026-09-04: el archivo de build-tree
+# se escribe en tiempo de CONFIGURE, aparte del de install-tree que sí
+# necesita el target install-cmake-exports que ya usa step_llvm() más
+# arriba). Hace falta para mesa_clc NATIVO -- ver comentario grande en la
+# sección "7c" más abajo (Vigésimo error real).
+# ------------------------------------------------------------------------------
+SPIRV_LLVM_TRANSLATOR_NATIVE_INSTALL="${LFS_BUILD}/spirv-llvm-translator-native-install"
+
+step_spirv_llvm_translator_native() {
+    if [[ -f "${SPIRV_LLVM_TRANSLATOR_NATIVE_INSTALL}/lib/pkgconfig/LLVMSPIRVLib.pc" ]]; then
+        log "SPIRV-LLVM-Translator NATIVO ya compilado en ${SPIRV_LLVM_TRANSLATOR_NATIVE_INSTALL}"
+        return 0
+    fi
+    [[ -f "${LLVM_NATIVE_BUILD}/lib/cmake/llvm/LLVMConfig.cmake" ]] \
+        || die "no está LLVMConfig.cmake NATIVO en ${LLVM_NATIVE_BUILD}/lib/cmake/llvm -- corré primero: scripts/build-mesa.sh llvm-native"
+    [[ -f "${SPIRV_TOOLS_NATIVE_INSTALL}/lib/pkgconfig/SPIRV-Tools.pc" ]] \
+        || die "no está SPIRV-Tools NATIVO -- corré primero: scripts/build-mesa.sh spirv-tools-native"
+    [[ -d "${SPIRV_HEADERS_FOR_TRANSLATOR_DIR}" ]] \
+        || die "no está SPIRV-Headers para SPIRV-LLVM-Translator -- corré primero: scripts/build-mesa.sh spirv-headers"
+
+    log "SPIRV-LLVM-Translator (llvm_release_230, commit ${SPIRV_LLVM_TRANSLATOR_COMMIT:0:12}) NATIVO — CMake+Ninja"
+
+    cd "${LFS_SOURCES}"
+    fetch "${SPIRV_LLVM_TRANSLATOR_MIRROR}/${SPIRV_LLVM_TRANSLATOR_COMMIT}.tar.gz" \
+          "spirv-llvm-translator-${SPIRV_LLVM_TRANSLATOR_COMMIT}.tar.gz"
+    log_sha256 "${LFS_SOURCES}/spirv-llvm-translator-${SPIRV_LLVM_TRANSLATOR_COMMIT}.tar.gz"
+    extract_once "${LFS_SOURCES}/spirv-llvm-translator-${SPIRV_LLVM_TRANSLATOR_COMMIT}.tar.gz" \
+                 "${LFS_BUILD}/.extracted-spirv-llvm-translator"
+
+    [[ -d "${SPIRV_LLVM_TRANSLATOR_SRC}" ]] \
+        || die "no se extrajo SPIRV-LLVM-Translator en ${SPIRV_LLVM_TRANSLATOR_SRC}"
+
+    local bdir="${LFS_BUILD}/spirv-llvm-translator-native-build"
+    rm -rf "${bdir}"
+
+    PKG_CONFIG_PATH="${SPIRV_TOOLS_NATIVE_INSTALL}/lib/pkgconfig" \
+    cmake -S "${SPIRV_LLVM_TRANSLATOR_SRC}" -B "${bdir}" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="${SPIRV_LLVM_TRANSLATOR_NATIVE_INSTALL}" \
+        -DLLVM_DIR="${LLVM_NATIVE_BUILD}/lib/cmake/llvm" \
+        -DLLVM_EXTERNAL_SPIRV_HEADERS_SOURCE_DIR="${SPIRV_HEADERS_FOR_TRANSLATOR_DIR}" \
+        -DLLVM_SPIRV_INCLUDE_TESTS=OFF
+
+    ninja -C "${bdir}" ${MAKEFLAGS}
+    ninja -C "${bdir}" install
+
+    [[ -f "${SPIRV_LLVM_TRANSLATOR_NATIVE_INSTALL}/lib/pkgconfig/LLVMSPIRVLib.pc" ]] \
+        || die "no se instaló LLVMSPIRVLib.pc NATIVO en ${SPIRV_LLVM_TRANSLATOR_NATIVE_INSTALL}/lib/pkgconfig"
+    log "SPIRV-LLVM-Translator NATIVO listo en ${SPIRV_LLVM_TRANSLATOR_NATIVE_INSTALL}"
 }
 
 # ------------------------------------------------------------------------------
@@ -1033,6 +1154,168 @@ step_verify_elfutils() {
 }
 
 # ------------------------------------------------------------------------------
+# 7c) mesa_clc + vtn_bindgen2 NATIVOS — build de Mesa APARTE, 100% nativo
+# (sin --cross-file), siguiendo al pie de la letra la receta OFICIAL de
+# Mesa para este escenario exacto (confirmado contra docs.mesa3d.org/
+# android.html, sección "cross-compiling the nvk driver", 2026-09-04 -- ese
+# doc es sobre Android/nvk pero la receta en sí es genérica de Meson/Mesa,
+# no específica de esa plataforma):
+#
+#   meson setup build-compiler -Dprefix=... -Dbuildtype=release -Dstrip=true
+#       -Dplatforms= -Dgallium-drivers= -Dvulkan-drivers=
+#       -Dmesa-clc=enabled -Dinstall-mesa-clc=true
+#   meson install -C build-compiler
+#   export PATH=.../bin:$PATH   # acá se resuelve con --native-file en vez
+#                                  de PATH (ver más abajo)
+#
+# Vigésimo error real (2026-09-04) -- por qué esto reemplaza por completo el
+# intento anterior (Décimo noveno, parte 2, revertido en este mismo commit):
+# forzar native:true a mano en el executable('mesa_clc', ...) de
+# src/compiler/clc/meson.build (adentro del build CRUZADO de Mesa) hacía que
+# mesa_clc pasara a compilarse con el compilador nativo, pero
+# idep_mesaclc/_libmesaclc (la libmesaclc estática de la que depende) sigue
+# declarada SIN native: en ese mismo archivo (confirmado leyendo el archivo
+# real completo, mirror/mesa, src/compiler/clc/meson.build) -- por default
+# eso la deja en contexto HOST (cruzado), y con mesa_clc ya native:true,
+# Meson rechaza mezclar los dos contextos en el mismo link. Error real
+# visto:
+#   src/compiler/clc/meson.build:129:18: ERROR: Tried to mix a host machine
+#   library ("libmesaclc") with a build machine target "mesa_clc" This is
+#   not possible in a cross build.
+# Parchear TAMBIÉN _libmesaclc a native:true no alcanzaba tampoco: esa
+# librería a su vez depende de dep_llvm/dep_clang/dep_spirv_tools/
+# dep_llvmspirvlib, TODAS declaradas sin native: en el meson.build raíz real
+# de Mesa (confirmado leyéndolo completo) -- forzar sólo _libmesaclc native
+# hubiera reproducido el MISMO error de mezcla de contextos un nivel más
+# abajo, ahora entre _libmesaclc (native) y dep_llvm (host). La única forma
+# de arreglar eso de raíz sería declarar TODA una segunda copia native de
+# LLVM/Clang/SPIRV-Tools/LLVMSPIRVLib adentro del propio meson.build de
+# Mesa -- reescribir a mano el build system entero de Mesa, inviable.
+#
+# La receta real de Mesa para este problema (confirmada en el meson.build
+# raíz real: `if get_option('mesa-clc') == 'system' prog_mesa_clc =
+# find_program('mesa_clc', native : true) ... else with_clc = ... or
+# with_driver_using_cl endif`, y en meson.options: option 'mesa-clc' con
+# choice 'system', descripción de 'install-mesa-clc': "Install the mesa-clc
+# compiler (if needed for cross builds)") es mucho más simple: no tratar de
+# que el build CRUZADO compile mesa_clc en absoluto. En cambio, acá se
+# compila un mesa_clc + vtn_bindgen2 100% NATIVOS en un build de Mesa
+# COMPLETAMENTE APARTE (sin --cross-file, sólo -Dmesa-clc=enabled
+# -Dinstall-mesa-clc=true y todos los drivers vacíos -- no hace falta
+# compilar ningún driver para esto, sólo src/compiler/{nir,spirv,clc} +
+# src/util), y se le pasan a Mesa esos dos binarios ya construidos vía
+# --native-file (mesa_clc/vtn_bindgen2 en [binaries]) + -Dmesa-clc=system en
+# el build CRUZADO real (ver step_mesa()) -- ahí `with_clc` queda en false
+# (este proyecto no usa rusticl), así que src/compiler/clc/meson.build ni
+# siquiera se procesa en el build cruzado: cero mezcla de contextos posible,
+# porque _libmesaclc/idep_mesaclc/dep_llvm-en-contexto-host nunca entran en
+# juego ahí.
+#
+# Confirmado que esto no deja nada a medias revisando quién más usa
+# prog_mesa_clc/prog_vtn_bindgen2 en el árbol real de Mesa (mirror/mesa,
+# src/intel/blorp/meson.build): sólo como comando de un custom_target()
+# (blorp_shaders_spv, compila blorp_shaders.cl a SPIR-V) -- se invoca como
+# programa ya compilado, no se linkea contra nada, así que basta con que el
+# binario NATIVO exista y corra.
+#
+# Dependencias NATIVAS que hacen falta para este build aparte (mismo patrón
+# que este script ya venía usando para LLVM/glslang, ahora también para
+# SPIRV-Tools/SPIRV-LLVM-Translator -- ver las dos secciones NATIVO justo
+# arriba de ésta): LLVM+Clang nativos (llvm-native, ya existía desde el
+# Décimo noveno), SPIRV-Tools nativo y SPIRV-LLVM-Translator nativo (los dos
+# nuevos de este fix).
+#
+# --native-file: llvm-config apunta directo a
+# ${LLVM_NATIVE_BUILD}/bin/llvm-config (sin instalar, mismo mecanismo de
+# "build tree" que SPIRV-LLVM-Translator-native de arriba) -- se declara
+# explícito para no depender de qué llvm-config haya en el PATH del
+# contenedor (podría ser uno viejo de apt, mismo motivo que la
+# "CORRECCIÓN #2" de step_llvm() más arriba). pkg_config_libdir con las dos
+# instalaciones NATIVAS de SPIRV-Tools/SPIRV-LLVM-Translator.
+#
+# patchelf al final: mismo motivo que la "red de seguridad" que este script
+# ya usaba para el mesa_clc CRUZADO (Décimo octavo/noveno, ahora removida de
+# step_mesa() porque ya no aplica) -- mesa_clc NATIVO linkea contra
+# libLLVM.so/libclang-cpp.so NATIVAS que están en ${LLVM_NATIVE_BUILD}/lib,
+# un directorio que no es una ruta de librerías del sistema. vtn_bindgen2 NO
+# lo necesita: sus dependencias (idep_vtn, idep_mesautil, idep_nir) son
+# todas internas de Mesa, sin LLVM de por medio (confirmado leyendo el
+# executable() real de vtn_bindgen2 en src/compiler/spirv/meson.build).
+# ------------------------------------------------------------------------------
+MESA_CLC_NATIVE_INSTALL="${LFS_BUILD}/mesa-clc-native-install"
+MESA_CLC_NATIVE_BIN="${MESA_CLC_NATIVE_INSTALL}/bin/mesa_clc"
+VTN_BINDGEN2_NATIVE_BIN="${MESA_CLC_NATIVE_INSTALL}/bin/vtn_bindgen2"
+
+step_mesa_clc_native() {
+    [[ -x "${LLVM_TABLEGEN_NATIVE}" ]] \
+        || die "no están LLVM/Clang NATIVOS -- corré primero: scripts/build-mesa.sh llvm-native"
+    find "${LLVM_NATIVE_BUILD}/lib" -maxdepth 1 -name 'libLLVM.so*' 2>/dev/null | grep -q . \
+        || die "no está libLLVM.so NATIVA en ${LLVM_NATIVE_BUILD}/lib -- corré primero: scripts/build-mesa.sh llvm-native"
+    find "${LLVM_NATIVE_BUILD}/lib" -maxdepth 1 -name 'libclang-cpp.so*' 2>/dev/null | grep -q . \
+        || die "no está libclang-cpp.so NATIVA en ${LLVM_NATIVE_BUILD}/lib -- corré primero: scripts/build-mesa.sh llvm-native"
+    [[ -f "${SPIRV_TOOLS_NATIVE_INSTALL}/lib/pkgconfig/SPIRV-Tools.pc" ]] \
+        || die "no está SPIRV-Tools NATIVO -- corré primero: scripts/build-mesa.sh spirv-tools-native"
+    [[ -f "${SPIRV_LLVM_TRANSLATOR_NATIVE_INSTALL}/lib/pkgconfig/LLVMSPIRVLib.pc" ]] \
+        || die "no está SPIRV-LLVM-Translator NATIVO -- corré primero: scripts/build-mesa.sh spirv-llvm-translator-native"
+
+    log "Mesa ${MESA_VERSION} -- build aparte 100% NATIVO SÓLO para mesa_clc + vtn_bindgen2 (Vigésimo error real, ver comentario grande arriba)"
+
+    cd "${LFS_SOURCES}"
+    fetch "${MESA_MIRROR}/mesa-mesa-${MESA_VERSION}.tar.gz" "mesa-${MESA_VERSION}.tar.gz"
+    log_sha256 "${LFS_SOURCES}/mesa-${MESA_VERSION}.tar.gz"
+    extract_once "${LFS_SOURCES}/mesa-${MESA_VERSION}.tar.gz" \
+                 "${LFS_BUILD}/.extracted-mesa"
+
+    local src="${LFS_BUILD}/mesa-mesa-${MESA_VERSION}"
+    [[ -d "${src}" ]] || die "no se extrajo Mesa en ${src}"
+
+    local nativefile="${LFS_BUILD}/meson-native-mesaclc-linsi.ini"
+    cat > "${nativefile}" <<EOF
+[binaries]
+llvm-config = '${LLVM_NATIVE_BUILD}/bin/llvm-config'
+
+[properties]
+pkg_config_libdir = ['${SPIRV_TOOLS_NATIVE_INSTALL}/lib/pkgconfig', '${SPIRV_LLVM_TRANSLATOR_NATIVE_INSTALL}/lib/pkgconfig']
+EOF
+
+    local bdir="${LFS_BUILD}/mesa-clc-native-build"
+    rm -rf "${bdir}"
+    rm -rf "${MESA_CLC_NATIVE_INSTALL}"
+
+    meson setup "${bdir}" \
+        --native-file="${nativefile}" \
+        --prefix="${MESA_CLC_NATIVE_INSTALL}" \
+        --buildtype=release \
+        -Dstrip=true \
+        -Dplatforms= \
+        -Dgallium-drivers= \
+        -Dvulkan-drivers= \
+        -Dmesa-clc=enabled \
+        -Dinstall-mesa-clc=true
+
+    ninja -C "${bdir}" ${MAKEFLAGS}
+    ninja -C "${bdir}" install
+
+    [[ -x "${MESA_CLC_NATIVE_BIN}" ]] || die "no se compiló mesa_clc NATIVO en ${MESA_CLC_NATIVE_BIN}"
+    [[ -x "${VTN_BINDGEN2_NATIVE_BIN}" ]] || die "no se compiló vtn_bindgen2 NATIVO en ${VTN_BINDGEN2_NATIVE_BIN}"
+
+    command -v patchelf >/dev/null 2>&1 \
+        || die "falta patchelf en el contenedor -- agregalo al Dockerfile (apt-get install patchelf) y correé 'podman-compose build' de nuevo"
+    patchelf --set-rpath "${LLVM_NATIVE_BUILD}/lib" "${MESA_CLC_NATIVE_BIN}"
+
+    # Chequeo real, no sólo "compiló sin error" -- Lección del Décimo octavo
+    # error real (ver docs/PENDIENTES.md): un ldd limpio prueba que el
+    # binario RESUELVE todas sus librerías dinámicas, no lo mismo que "ninja
+    # terminó sin fallar".
+    if ldd "${MESA_CLC_NATIVE_BIN}" 2>&1 | grep -q 'not found'; then
+        ldd "${MESA_CLC_NATIVE_BIN}" >&2
+        die "mesa_clc NATIVO no resuelve todas sus librerías dinámicas (ver ldd arriba) -- el patchelf de RPATH no alcanzó"
+    fi
+
+    log "mesa_clc + vtn_bindgen2 NATIVOS listos en ${MESA_CLC_NATIVE_INSTALL}/bin"
+}
+
+# ------------------------------------------------------------------------------
 # 8) Mesa — Meson. Drivers elegidos para cubrir Intel/AMD/Nvidia reales del
 # lab (ver el aviso al principio del archivo). --native-file hace falta
 # porque Mesa también invoca wayland-scanner en tiempo de build (protocolo
@@ -1063,18 +1346,20 @@ step_mesa() {
         || die "no está el wayland-scanner NATIVO en ${WAYLAND_SCANNER_NATIVE_PREFIX}/bin -- corré primero: scripts/build-desktop.sh wayland (Fase 6 Parte 1)"
     [[ -x "${GLSLANG_NATIVE_BIN}" ]] \
         || die "no está glslangValidator NATIVO en ${GLSLANG_NATIVE_BIN} -- corré primero: scripts/build-mesa.sh glslang-native"
-    # Con iris/intel_vk habilitados, Mesa activa with_driver_using_cl (compila
-    # mesa-clc/intel_clc) -- ver bloque grande al principio del archivo.
+    # Con iris/intel_vk habilitados, Mesa activa with_driver_using_cl -- pero
+    # desde el Vigésimo error real (2026-09-04) mesa_clc/intel_clc YA NO se
+    # compilan acá adentro: se usa -Dmesa-clc=system con un mesa_clc +
+    # vtn_bindgen2 NATIVOS pre-compilados aparte (ver step_mesa_clc_native()
+    # y su comentario grande, sección "7c"). libclang-cpp.so CRUZADA sigue
+    # haciendo falta igual -- Mesa la resuelve al margen de with_clc (la usan
+    # otros consumidores, confirmado que no cuesta nada dejar el chequeo).
     if ! find "${LFS_SYSROOT}/usr/lib" -maxdepth 1 -name 'libclang-cpp.so*' 2>/dev/null | grep -q .; then
         die "no está libclang-cpp.so en el sysroot -- corré primero: scripts/build-mesa.sh llvm (ya con LLVM_ENABLE_PROJECTS=clang)"
     fi
-    # mesa_clc necesita, además, libLLVM.so/libclang-cpp.so NATIVAS de verdad
-    # (no las cruzadas de arriba) -- ver el comentario largo más abajo, antes
-    # del patch a src/compiler/clc/meson.build (Décimo noveno error real).
-    if ! find "${LLVM_NATIVE_BUILD}/lib" -maxdepth 1 -name 'libLLVM.so*' 2>/dev/null | grep -q . \
-        || ! find "${LLVM_NATIVE_BUILD}/lib" -maxdepth 1 -name 'libclang-cpp.so*' 2>/dev/null | grep -q .; then
-        die "no están libLLVM.so/libclang-cpp.so NATIVAS en ${LLVM_NATIVE_BUILD}/lib -- corré primero: scripts/build-mesa.sh llvm-native"
-    fi
+    [[ -x "${MESA_CLC_NATIVE_BIN}" ]] \
+        || die "no está mesa_clc NATIVO en ${MESA_CLC_NATIVE_BIN} -- corré primero: scripts/build-mesa.sh mesa-clc-native"
+    [[ -x "${VTN_BINDGEN2_NATIVE_BIN}" ]] \
+        || die "no está vtn_bindgen2 NATIVO en ${VTN_BINDGEN2_NATIVE_BIN} -- corré primero: scripts/build-mesa.sh mesa-clc-native"
     if ! find "${LFS_SYSROOT}/usr/lib/pkgconfig" -maxdepth 1 -name 'SPIRV-Tools.pc' 2>/dev/null | grep -q .; then
         die "no está SPIRV-Tools.pc en el sysroot -- corré primero: scripts/build-mesa.sh spirv-headers && scripts/build-mesa.sh spirv-tools"
     fi
@@ -1097,52 +1382,21 @@ step_mesa() {
     local src="${LFS_BUILD}/mesa-mesa-${MESA_VERSION}"
     cd "${src}"
 
-    # Décimo noveno error real (2026-09-03) -- parte 1: parchear
-    # src/compiler/clc/meson.build. Texto real (confirmado contra el mirror
-    # de GitHub, mirror/mesa, rama main -- src/compiler/clc/meson.build):
-    #   native : not meson.can_run_host_binaries(),
-    # con este comentario arriba en la fuente real de Mesa: "If we can run
-    # host binaries directly, just build mesa_clc for the host. Most
-    # commonly this happens when doing a cross compile from an x86_64 build
-    # machine to an x86 host". En ESTE proyecto build==host en arquitectura
-    # (los dos son x86_64), así que can_run_host_binaries() da true, native
-    # da false, y Mesa compila mesa_clc con el compilador de la CROSS-FILE
-    # (el propio cross-toolchain de Fase 0, linkeado contra la glibc/
-    # libstdc++ recién compiladas del sysroot) -- NO con el compilador del
-    # --native-file. Es el MISMO error de fondo que "CORREGIDO (2026-08-29)"
-    # en env.sh para wayland-scanner/glib-compile-resources ("misma
-    # arquitectura no implica que corra sin dramas"), pero acá Mesa lo hace
-    # a propósito como optimización de tiempo de build, no por descuido.
-    # Confirmado con `ldd` real sobre el mesa_clc resultante (2026-09-03):
-    #   libstdc++.so.6: version `GLIBCXX_3.4.32' not found
-    #   libc.so.6: version `GLIBC_2.38' not found
-    #   libLLVM.so.23.1 => not found
-    #   libclang-cpp.so.23.1 => not found
-    # -- es decir, un choque de VERSIÓN de glibc/libstdc++ (como
-    # spa-json-dump en build-desktop.sh) SUMADO a librerías cruzadas que ni
-    # siquiera están en el RPATH. Un patchelf de RPATH solo (primer intento,
-    # ver más abajo) no alcanza: arregla lo segundo pero no toca lo primero,
-    # porque el choque de versión de glibc/libstdc++ está grabado en el
-    # propio código objeto (símbolos versionados que pide el binario), no es
-    # cosa de dónde busca las librerías. La única solución real es que
-    # mesa_clc se compile con el compilador NATIVO de punta a punta -- se
-    # fuerza `native : true` a mano (no hay ninguna opción de meson.build de
-    # Mesa que lo permita desde afuera). Sed idempotente + verificación
-    # (falla fuerte si el texto esperado no aparece, mismo criterio que el
-    # resto de los parches de este proyecto).
-    local clc_meson="${src}/src/compiler/clc/meson.build"
-    [[ -f "${clc_meson}" ]] || die "no está ${clc_meson} -- ¿cambió la estructura de directorios de Mesa ${MESA_VERSION}?"
-    # Ojo con la coma final: el match tiene que incluirla (no sólo la
-    # llamada a can_run_host_binaries()) para que no quede "tragada" adentro
-    # del comentario -- si eso pasa, se pierde el separador real entre este
-    # kwarg y el siguiente (install : ...) y meson.build queda con un error
-    # de sintaxis (coma faltante entre argumentos). Verificado con un caso
-    # de prueba real antes de commitear esto.
-    sed -i "s/native[[:space:]]*:[[:space:]]*not meson\.can_run_host_binaries(),/native : true,  # LINSI-OS: forzado nativo, ver docs\/PENDIENTES.md (Decimo noveno error real)/" \
-        "${clc_meson}"
-    grep -q "native : true,  # LINSI-OS" "${clc_meson}" \
-        || die "el parche a ${clc_meson} no prendió -- ¿cambió el texto real de 'native : not meson.can_run_host_binaries(),' en Mesa ${MESA_VERSION}?"
-    log "mesa_clc forzado a native:true en ${clc_meson} (ver Décimo noveno error real)"
+    # Décimo noveno error real, parte 2 -- REVERTIDO (2026-09-04, Vigésimo
+    # error real): este script llegó a parchear src/compiler/clc/meson.build
+    # a mano (sed forzando `native : true` en el executable('mesa_clc', ...)
+    # ) para que mesa_clc se compilara con el compilador NATIVO. Eso
+    # destapó un error NUEVO en el siguiente `meson setup` ("Tried to mix a
+    # host machine library ("libmesaclc") with a build machine target
+    # "mesa_clc" This is not possible in a cross build.") porque
+    # idep_mesaclc/_libmesaclc (y sus propias dependencias: dep_llvm,
+    # dep_clang, dep_spirv_tools, dep_llvmspirvlib) siguen sin native: en
+    # ESE MISMO archivo -- forzar sólo el executable() no alcanza, y forzar
+    # también la librería reproduciría el mismo choque un nivel más abajo
+    # contra dep_llvm. El fix real -- no tocar el meson.build de Mesa en
+    # absoluto, usar mesa_clc/vtn_bindgen2 NATIVOS pre-compilados aparte
+    # con -Dmesa-clc=system -- está en step_mesa_clc_native() (sección "7c"
+    # más arriba); ese comentario tiene el diagnóstico completo.
 
     local crossfile="${LFS_BUILD}/meson-cross-linsi.ini"
     # llvm-config: ver el comentario largo de "CORRECCIÓN #2" más arriba --
@@ -1151,21 +1405,14 @@ step_mesa() {
     write_meson_crossfile "${crossfile}" "glslangValidator = '${GLSLANG_NATIVE_BIN}'
 llvm-config = '${LFS_SYSROOT}/usr/bin/llvm-config'"
 
-    # Décimo noveno error real -- parte 2 (por qué el --native-file NO
-    # necesita un llvm-config propio): confirmado contra el meson.build real
-    # de Mesa (raíz del repo) -- `dep_llvm = dependency('llvm', method:
-    # ..., ...)` y `dep_spirv_tools = dependency('SPIRV-Tools', ...)` se
-    # declaran SIN `native:` en ningún lado, así que Meson los resuelve
-    # SIEMPRE en contexto host/cruzado (usa el llvm-config del --cross-file
-    # de arriba), sin importar el `native:` puntual del executable() de
-    # mesa_clc que los consume -- ese es justo el mecanismo real detrás del
-    # comentario de Mesa ("si podés correr binarios del host, compilá para
-    # el host"): en un cross real (ARM, etc.) mesa_clc queda native:true
-    # PERO sigue linkeando contra el dep_llvm/dep_spirv_tools del host/
-    # cruzado -- exactamente lo mismo que pasa acá. No hace falta (ni serviría
-    # de nada) un llvm-config nativo en el --native-file para esto.
+    # mesa_clc/vtn_bindgen2 NATIVOS (Vigésimo error real, ver step_mesa_clc_native()
+    # más arriba): con -Dmesa-clc=system, Mesa busca estos dos programas con
+    # find_program(..., native : true) -- se los pisamos acá en vez de
+    # depender de que estén en el PATH del contenedor.
     local nativefile="${LFS_BUILD}/meson-native-linsi.ini"
-    write_meson_nativefile "${nativefile}" "glslangValidator = '${GLSLANG_NATIVE_BIN}'"
+    write_meson_nativefile "${nativefile}" "glslangValidator = '${GLSLANG_NATIVE_BIN}'
+mesa_clc = '${MESA_CLC_NATIVE_BIN}'
+vtn_bindgen2 = '${VTN_BINDGEN2_NATIVE_BIN}'"
 
     local bdir="${src}/build"
     rm -rf "${bdir}"
@@ -1187,6 +1434,7 @@ llvm-config = '${LFS_SYSROOT}/usr/bin/llvm-config'"
         -Dvulkan-drivers=amd,intel \
         -Dllvm=enabled \
         -Dshared-llvm=enabled \
+        -Dmesa-clc=system \
         -Dvalgrind=disabled \
         -Dgbm=enabled \
         -Degl=enabled \
@@ -1196,64 +1444,15 @@ llvm-config = '${LFS_SYSROOT}/usr/bin/llvm-config'"
         -Dglvnd=disabled \
         -Dgallium-va=disabled
 
-    # Décimo octavo error real (2026-09-02), CORREGIDO/ampliado por el
-    # Décimo noveno (ver el comentario largo más arriba, antes del sed a
-    # src/compiler/clc/meson.build): con iris/intel_vk habilitados, Mesa
-    # compila mesa_clc (src/compiler/clc/mesa_clc) -- un ejecutable que
-    # corre DURANTE el propio build, invocado directo por ninja, para
-    # traducir shaders internos en OpenCL C (blorp_shaders.cl, etc.) a
-    # SPIR-V. Un `ninja -C "${bdir}" ${MAKEFLAGS}` a secas lo deja reventar
-    # en tiempo de ejecución con "error while loading shared libraries:
-    # libLLVM.so.23.1: cannot open shared object file".
-    #
-    # Primer intento de fix (Décimo octavo, INSUFICIENTE): patchelear el
-    # RPATH de mesa_clc apuntando a ${LLVM_NATIVE_BUILD}/lib. Se aplicó
-    # limpio (sin error) pero el problema siguió idéntico -- confirmado con
-    # `ldd`/`readelf -d` reales sobre el mesa_clc resultante (ver Décimo
-    # noveno error real más arriba): (a) ${LLVM_NATIVE_BUILD}/lib en ese
-    # momento sólo tenía los .a estáticos de llvm-tblgen/llvm-config/
-    # clang-tblgen, CERO .so -- el RPATH apuntaba a un directorio vacío de
-    # verdad; y (b) más de fondo, mesa_clc ni siquiera se estaba compilando
-    # con el compilador NATIVO -- el propio meson.build de Mesa (`native :
-    # not meson.can_run_host_binaries()`) lo compila con el toolchain
-    # CRUZADO cuando build==host en arquitectura (este caso), así que
-    # además de las libs cruzadas faltantes, el binario pedía símbolos de
-    # glibc/libstdc++ MÁS NUEVOS que los del contenedor
-    # (`GLIBC_2.38`/`GLIBCXX_3.4.32` no encontrados) -- un choque de
-    # VERSIÓN que ningún RPATH puede arreglar, sólo compilar con el
-    # compilador correcto de punta a punta.
-    #
-    # Fix real (Décimo noveno, éste sí verificado por partes): (1) se
-    # fuerza `native : true` en el meson.build de Mesa (sed más arriba) para
-    # que mesa_clc se compile con el compilador NATIVO de verdad; (2)
-    # step_llvm_native() ahora también construye libLLVM.so/libclang-cpp.so
-    # NATIVAS de verdad en ${LLVM_NATIVE_BUILD}/lib; (3) el --native-file le
-    # da a Mesa un llvm-config que apunta a esas rutas nativas reales. El
-    # patchelf de acá abajo queda como RED DE SEGURIDAD, no como el fix
-    # principal: Meson no siempre agrega un RPATH automático para
-    # dependencias resueltas por config-tool (como LLVM acá), así que aunque
-    # mesa_clc ya se compile bien nativo, puede seguir sin encontrar
-    # libLLVM.so/libclang-cpp.so en tiempo de ejecución si no se le fuerza
-    # el RPATH a mano -- con (1)+(2)+(3) ya aplicados, esta vez SÍ hay algo
-    # real en ${LLVM_NATIVE_BUILD}/lib para que el RPATH apunte.
-    command -v patchelf >/dev/null 2>&1 \
-        || die "falta patchelf en el contenedor -- agregalo al Dockerfile (apt-get install patchelf) y correé 'podman-compose build' de nuevo"
-
-    local clc_targets
-    clc_targets="$(ninja -C "${bdir}" -t targets all 2>/dev/null \
-        | awk -F: '{print $1}' | grep -E '/[A-Za-z0-9_]*clc$' || true)"
-    if [[ -n "${clc_targets}" ]]; then
-        log "Ejecutable(s) *_clc detectado(s) en el grafo de Mesa: ${clc_targets//$'\n'/, } -- compilando aparte para corregirles el RPATH antes del build completo"
-        # shellcheck disable=SC2086
-        ninja -C "${bdir}" ${MAKEFLAGS} ${clc_targets}
-        local t
-        while IFS= read -r t; do
-            [[ -n "${t}" && -f "${bdir}/${t}" ]] || continue
-            patchelf --set-rpath "${LLVM_NATIVE_BUILD}/lib" "${bdir}/${t}"
-            log "RPATH corregido (nativo, ${LLVM_NATIVE_BUILD}/lib) en ${t}"
-        done <<< "${clc_targets}"
-    fi
-
+    # Décimo octavo/Décimo noveno error real -- YA NO APLICA (2026-09-04,
+    # Vigésimo error real): con -Dmesa-clc=system + -Dgallium-drivers=rusticl
+    # ausente, `with_clc` queda en false para ESTE build cruzado -- Mesa ni
+    # siquiera procesa src/compiler/clc/meson.build acá, así que no existe
+    # ningún ejecutable *_clc en este grafo de ninja para parchear. mesa_clc/
+    # vtn_bindgen2 ya vienen NATIVOS y con su RPATH corregido desde
+    # step_mesa_clc_native() (sección "7c"); Mesa sólo los INVOCA como
+    # comandos ya compilados (custom_target() en src/intel/blorp/meson.build,
+    # confirmado leyendo el archivo real) -- no hay nada más que patchear acá.
     ninja -C "${bdir}" ${MAKEFLAGS}
     DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
 
@@ -1303,10 +1502,13 @@ main() {
         spirv-headers)            step_spirv_headers ;;
         spirv-tools)              step_spirv_tools ;;
         verify-spirv-tools)       step_verify_spirv_tools ;;
+        spirv-tools-native)       step_spirv_tools_native ;;
         spirv-llvm-translator)    step_spirv_llvm_translator ;;
         verify-spirv-llvm-translator) step_verify_spirv_llvm_translator ;;
+        spirv-llvm-translator-native) step_spirv_llvm_translator_native ;;
         elfutils)                 step_elfutils ;;
         verify-elfutils)          step_verify_elfutils ;;
+        mesa-clc-native)          step_mesa_clc_native ;;
         mesa)                     step_mesa ;;
         verify-mesa)              step_verify_mesa ;;
         all)
@@ -1316,13 +1518,16 @@ main() {
             step_glslang_native
             step_spirv_headers
             step_spirv_tools;             step_verify_spirv_tools
+            step_spirv_tools_native
             step_spirv_llvm_translator;   step_verify_spirv_llvm_translator
+            step_spirv_llvm_translator_native
             step_elfutils;    step_verify_elfutils
+            step_mesa_clc_native
             step_mesa;        step_verify_mesa
-            log "Fase 6 parte 2 ('Mesa + LLVM') completa: libdrm, LLVM+Clang (X86+AMDGPU), SPIRV-Tools, SPIRV-LLVM-Translator, elfutils (libelf) y Mesa (iris/radeonsi/nouveau/llvmpipe + Vulkan amd/intel, con mesa-clc/intel_clc para Intel real) listos en el sysroot. Falta Qt6/KDE Frameworks -- va en su propio script."
+            log "Fase 6 parte 2 ('Mesa + LLVM') completa: libdrm, LLVM+Clang (X86+AMDGPU), SPIRV-Tools, SPIRV-LLVM-Translator, elfutils (libelf), mesa_clc/vtn_bindgen2 NATIVOS y Mesa (iris/radeonsi/nouveau/llvmpipe + Vulkan amd/intel, con mesa-clc/intel_clc para Intel real) listos en el sysroot. Falta Qt6/KDE Frameworks -- va en su propio script."
             ;;
         *)
-            die "target desconocido: ${target} (usar: libdrm|llvm-native|llvm|glslang-native|spirv-headers|spirv-tools|spirv-llvm-translator|elfutils|mesa|all, cada uno con su verify-<paso> salvo llvm-native/glslang-native/spirv-headers)"
+            die "target desconocido: ${target} (usar: libdrm|llvm-native|llvm|glslang-native|spirv-headers|spirv-tools|spirv-tools-native|spirv-llvm-translator|spirv-llvm-translator-native|elfutils|mesa-clc-native|mesa|all, cada uno con su verify-<paso> salvo llvm-native/glslang-native/spirv-headers/spirv-tools-native/spirv-llvm-translator-native/mesa-clc-native)"
             ;;
     esac
 }

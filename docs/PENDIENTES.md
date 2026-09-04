@@ -1095,6 +1095,10 @@ las Partes 2/3.
   `${LLVM_NATIVE_BUILD}/lib` realmente tuviera algo adentro para que el
   RPATH apuntara.
 
+- **Décimo noveno error real (2026-09-03), parte 2 del fix REVERTIDA por el
+  Vigésimo error real (2026-09-04, ver más abajo) -- el resto de este fix
+  (partes 1 y 3) sigue vigente y correcto:**
+
 - **Décimo noveno error real (2026-09-03), corregido -- mismo error que el
   Décimo octavo (`mesa_clc: error while loading shared libraries:
   libLLVM.so.23.1: cannot open shared object file`), IDÉNTICO en el
@@ -1165,14 +1169,20 @@ las Partes 2/3.
      puntuales). Esto deja `libLLVM.so`/`libclang-cpp.so` NATIVAS de
      verdad en `${LLVM_NATIVE_BUILD}/lib`, con verificación explícita
      (`find ... || die`) de que existan antes de seguir.
-  2. En `src/compiler/clc/meson.build` (fuente de Mesa ya descomprimida),
-     un `sed` idempotente + verificado cambia
-     `native : not meson.can_run_host_binaries(),` por `native : true,`
-     (con cuidado de no "tragarse" la coma final adentro del comentario
-     agregado -- un caso de prueba real confirmó que un primer intento sin
-     esto rompía la sintaxis del `meson.build`). Esto fuerza a `mesa_clc`
-     a compilarse con el compilador NATIVO de punta a punta, eliminando el
-     choque de versión de glibc/libstdc++.
+  2. **[REVERTIDO por el Vigésimo error real, 2026-09-04 -- ver esa entrada
+     más abajo, NO aplicar este paso]** En `src/compiler/clc/meson.build`
+     (fuente de Mesa ya descomprimida), un `sed` idempotente + verificado
+     cambiaba `native : not meson.can_run_host_binaries(),` por
+     `native : true,` (con cuidado de no "tragarse" la coma final adentro
+     del comentario agregado -- un caso de prueba real confirmó que un
+     primer intento sin esto rompía la sintaxis del `meson.build`). Esto
+     forzaba a `mesa_clc` a compilarse con el compilador NATIVO de punta a
+     punta, eliminando el choque de versión de glibc/libstdc++ -- pero
+     dejaba a `mesa_clc` (ahora `native:true`) linkeando contra
+     `idep_mesaclc`/`_libmesaclc`, que sigue sin `native:` en ese mismo
+     archivo (contexto host/cruzado por default): el siguiente `meson
+     setup` rompía con "Tried to mix a host machine library ("libmesaclc")
+     with a build machine target "mesa_clc"". Ver Vigésimo error real.
   3. El `patchelf --set-rpath "${LLVM_NATIVE_BUILD}/lib"` del Décimo
      octavo se deja tal cual, como red de seguridad -- Meson no siempre
      agrega un RPATH automático para una dependencia resuelta por
@@ -1206,6 +1216,139 @@ las Partes 2/3.
   "target" tiene una glibc más nueva que el propio contenedor de build --
   hay que estar atento a este patrón en cualquier build de terceros que
   Mesa/LLVM/otros activen más adelante, no sólo acá.
+
+- **Vigésimo error real (2026-09-04), corregido -- consecuencia directa de
+  la parte 2 del fix del Décimo noveno (el `sed` a
+  `src/compiler/clc/meson.build` forzando `native : true` en el
+  `executable('mesa_clc', ...)`):**
+
+  ```
+  src/compiler/clc/meson.build:129:18: ERROR: Tried to mix a host machine
+  library ("libmesaclc") with a build machine target "mesa_clc" This is
+  not possible in a cross build.
+  ```
+
+  Error de **configure** de Meson (`meson setup` nunca llega a `ninja`),
+  no de build -- confirmado con el log completo del usuario: `llvm-native`
+  terminó perfecto (3605/3605 targets, `libLLVM.so.23.1`/
+  `libclang-cpp.so.23.1` NATIVAS presentes), el `sed` del Décimo noveno
+  prendió bien (`[fase6-2] mesa_clc forzado a native:true en
+  .../src/compiler/clc/meson.build`), pero el `meson setup` que sigue
+  rompió antes de terminar de configurar.
+
+  **Causa raíz real (confirmada leyendo el archivo completo real,
+  `mirror/mesa`, rama `main`, `src/compiler/clc/meson.build`):**
+  ```meson
+  _libmesaclc = static_library(
+    'libmesaclc',
+    files_libmesaclc,
+    ...
+    dependencies: [idep_nir, dep_clang, dep_llvm, dep_llvmspirvlib,
+                   idep_mesautil, dep_spirv_tools, idep_vtn, dep_version]
+  )
+  idep_mesaclc = declare_dependency(link_with : _libmesaclc, ...)
+
+  if get_option('mesa-clc') != 'system' and (with_driver_using_cl or ...)
+    prog_mesa_clc = executable(
+      'mesa_clc', ['mesa_clc.c'], ...,
+      dependencies : [idep_mesaclc, dep_llvm, dep_spirv_tools, idep_getopt],
+      native : not meson.can_run_host_binaries(),  # <- el sed de acá
+      install : get_option('install-mesa-clc'),
+    )
+  endif
+  ```
+  El `sed` del Décimo noveno sólo tocaba el `native:` del `executable()`
+  de `mesa_clc`. Pero `_libmesaclc` (la librería estática de la que
+  depende vía `idep_mesaclc`) se declara **sin** `native:` -- Meson la deja
+  en contexto host/cruzado por default. Con `mesa_clc` ya `native:true`
+  (contexto "build machine") pero `idep_mesaclc` seguía en contexto host
+  ("host machine"), Meson rechaza el link: exactamente el error de arriba.
+  Parchear TAMBIÉN `_libmesaclc` a `native:true` no hubiera alcanzado
+  tampoco -- esa librería a su vez depende de `dep_llvm`/`dep_clang`/
+  `dep_spirv_tools`/`dep_llvmspirvlib`, que en el `meson.build` RAÍZ real de
+  Mesa (confirmado leyéndolo completo) **también** se declaran sin
+  `native:` -- forzar sólo `_libmesaclc` hubiera reproducido el mismo
+  choque un nivel más abajo, contra `dep_llvm`. La única forma de arreglar
+  esto de raíz parcheando meson.build a mano sería declarar una segunda
+  copia NATIVE completa de LLVM/Clang/SPIRV-Tools/LLVMSPIRVLib adentro del
+  propio árbol de Mesa -- inviable.
+
+  **La receta real de Mesa para este problema exacto** (confirmada en
+  `meson.options`: opción `mesa-clc` con choices `['enabled', 'system',
+  'auto']`, descripción de `install-mesa-clc`: *"Install the mesa-clc
+  compiler (if needed for cross builds)"*; y en `docs.mesa3d.org/
+  android.html`, sección "cross-compiling the nvk driver", que documenta
+  exactamente este flujo de dos pasadas) es no tocar el `meson.build` de
+  Mesa para nada. En cambio:
+  1. Se compila un `mesa_clc` + `vtn_bindgen2` **100% NATIVOS** en un build
+     de Mesa completamente aparte (nueva `step_mesa_clc_native()` en
+     `build-mesa.sh`, nuevo target `mesa-clc-native`), sin `--cross-file`,
+     con `-Dplatforms= -Dgallium-drivers= -Dvulkan-drivers=` (nada de
+     drivers, no hace falta ninguno para esto) y
+     `-Dmesa-clc=enabled -Dinstall-mesa-clc=true` (fuerza `with_clc=true`
+     y la instalación de ambos binarios sin importar drivers). Esto
+     necesitó DOS dependencias nativas nuevas que no existían todavía:
+     **SPIRV-Tools NATIVO** (`step_spirv_tools_native()`, nuevo target
+     `spirv-tools-native`) y **SPIRV-LLVM-Translator NATIVO**
+     (`step_spirv_llvm_translator_native()`, nuevo target
+     `spirv-llvm-translator-native`) -- ambos mismos flags de CMake que sus
+     contrapartes cruzadas, sin `--cross-file`, instalados en prefijos
+     nativos aparte bajo `${LFS_BUILD}` (nunca en el sysroot). El
+     `LLVM_DIR` de SPIRV-LLVM-Translator-native apunta directo a
+     `${LLVM_NATIVE_BUILD}/lib/cmake/llvm` -- LLVM genera su
+     `LLVMConfig.cmake` de "build tree" en tiempo de `cmake configure`, sin
+     hacer falta instalar nada (mecanismo estándar de LLVM/CMake).
+  2. `mesa_clc` NATIVO se patchelfea con
+     `--set-rpath ${LLVM_NATIVE_BUILD}/lib` (mismo motivo que la red de
+     seguridad del Décimo noveno: linkea contra `libLLVM.so`/
+     `libclang-cpp.so` NATIVAS en un directorio no estándar) y se verifica
+     con `ldd | grep 'not found'` antes de dar el paso por bueno --
+     `vtn_bindgen2` no lo necesita (sus dependencias son todas internas de
+     Mesa, sin LLVM, confirmado leyendo su `executable()` real en
+     `src/compiler/spirv/meson.build`).
+  3. En `step_mesa()` (el build CRUZADO real): se revierte el `sed` del
+     Décimo noveno parte 2 (ya no se toca
+     `src/compiler/clc/meson.build`), se agrega `-Dmesa-clc=system` al
+     `meson setup`, y se pisan `mesa_clc`/`vtn_bindgen2` en el
+     `--native-file` apuntando a los binarios NATIVOS del paso 1
+     (`find_program(..., native : true)` los busca ahí, no en el PATH del
+     contenedor). Con `-Dmesa-clc=system` y sin rusticl, `with_clc` queda
+     en `false` para este build cruzado -- Mesa ni siquiera procesa
+     `src/compiler/clc/meson.build` acá, así que la mezcla de contextos ya
+     no puede pasar. Se retira también el bloque de la "red de seguridad"
+     (detectar ejecutables `*_clc` en el grafo de ninja y patchelearlos)
+     porque ya no existe ningún target así en este build.
+  4. Confirmado que ningún otro lugar del árbol real de Mesa necesita un
+     ajuste más: `idep_mesaclc` sólo lo consume `mesa_clc` (único
+     `executable()`/`declare_dependency()` en todo
+     `src/compiler/clc/meson.build`), y `prog_mesa_clc`/
+     `prog_vtn_bindgen2` (los binarios ya compilados) sólo se invocan como
+     comando de un `custom_target()` en `src/intel/blorp/meson.build`
+     (`blorp_shaders_spv`, compila `blorp_shaders.cl` a SPIR-V) -- no se
+     linkean contra nada, así que basta con que el binario NATIVO exista y
+     corra.
+
+  Cambios en `build-mesa.sh`: 3 steps nuevos (`step_spirv_tools_native()`,
+  `step_spirv_llvm_translator_native()`, `step_mesa_clc_native()`, targets
+  `spirv-tools-native`/`spirv-llvm-translator-native`/`mesa-clc-native`),
+  `step_mesa()` con el `sed` revertido + `-Dmesa-clc=system` +
+  `--native-file` extendido + red de seguridad retirada, secuencia `all)`
+  actualizada. Validado con `bash -n` y `shellcheck -S warning -e SC1091`
+  (limpio, sin findings).
+
+  **Lección:** un `native:true` a mano en UN SOLO target de un
+  `meson.build` de terceros no alcanza si ese target depende de otros
+  targets/dependencias del MISMO archivo (o de archivos relacionados) que
+  también necesitan ser consistentes en contexto host-vs-build -- Meson lo
+  chequea estrictamente y no mezcla. Antes de parchear un `native:` puntual
+  a mano, vale la pena buscar primero si el proyecto YA tiene un mecanismo
+  oficial para este problema exacto (acá: la opción `mesa-clc=system` +
+  `install-mesa-clc`, pensada literalmente para "necesito esta herramienta
+  de build-time nativa en un cross build") -- earlier hubiera evitado dos
+  vueltas completas de debug (Décimo noveno parte 2 + este Vigésimo). La
+  búsqueda que lo destapó fue simple: la propia documentación oficial de
+  Mesa para cross-compiling (`docs.mesa3d.org/android.html`) ya trae la
+  receta completa, no hizo falta inventar nada.
 
 ## Fase 6 — Parte 3 (no empezada)
 
