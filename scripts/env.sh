@@ -265,6 +265,11 @@ export LIBEVDEV_VERSION="1.13.6"
 export XKEYBOARD_CONFIG_VERSION="2.48"
 export LIBINPUT_VERSION="1.31.3"             # VERIFICAR: gitlab.fd.o bloqueado en el sandbox
 export LIBXKBCOMMON_VERSION="1.13.2"         # VERIFICAR: tag-archive de GitHub, no un tarball de "make dist"
+# libxml2: prerequisito de xkbregistry (Fase 6 Parte 3), agregado 2026-09-04.
+# Confirmado en vivo (tag real "v2.15.3" en GNOME/libxml2, sha256 real
+# 5c6060277173270356c3f1c321a640ab629bdabc5e5ba9095b99e00759ba0c39, archivo
+# de GitHub SÍ pisa el "v" -- extrae a "libxml2-2.15.3/").
+export LIBXML2_VERSION="2.15.3"
 export ALSA_LIB_VERSION="1.2.16.1"
 export LUA_VERSION="5.4.8"
 export PIPEWIRE_VERSION="1.6.8"              # VERIFICAR: gitlab.fd.o bloqueado en el sandbox
@@ -383,6 +388,313 @@ export SPIRV_LLVM_TRANSLATOR_COMMIT="c808623558686b7b285cabfa71542a93a5390f55" #
 # éxito en corridas reales de este proyecto, así que el dominio en sí no es
 # problema para el contenedor del usuario, sólo para este sandbox puntual.
 export ELFUTILS_VERSION="0.191"
+
+# --- Fase 6 Parte 3 (Qt6 + KDE Frameworks/Plasma) — decisiones tomadas
+# 2026-09-04, research completo contra fuentes reales antes de escribir nada
+# (invent.kde.org y github.com/qt SÍ accesibles desde este sandbox, a
+# diferencia de gitlab.freedesktop.org/gitlab.gnome.org de research anteriores
+# -- confirmado en vivo, no asumido). Ver docs/PENDIENTES.md para el mapa
+# completo de dependencias por tier.
+#
+# Qt6 6.11.2: último release estable real (confirmado contra los tags de
+# github.com/qt/qtbase) -- supera cómodo el mínimo real que pide kwin/
+# plasma-workspace (QT_MIN_VERSION 6.10.0, leído directo de sus
+# CMakeLists.txt reales). Mismo criterio de "vanguardia" ya usado en el
+# resto del proyecto: última versión real, no el piso mínimo de un
+# consumidor. Placeholder acá -- step_qtbase()/etc. todavía no están
+# escritos, es el próximo bloque de trabajo real después de ECM.
+export QT6_VERSION="6.11.2"
+#
+# KDE Frameworks 6 (KF6) + "tren de Plasma": KF6_MIN_VERSION real de kwin es
+# 6.27.0, el de plasma-workspace 6.26.0 -- se fija el tren completo en
+# 6.29.0, el último REALMENTE PUBLICADO en download.kde.org/stable/frameworks/
+# (confirmado en vivo listando ese directorio: hasta 6.29/, la rama "master"
+# de los repos individuales ya apunta a 6.30.0 sin publicar todavía, no sirve
+# como fuente de versión real). extra-cmake-modules (ECM) es parte de este
+# mismo tren de versiones.
+export KDE_VERSION="6.29.0"
+#
+# ECM (extra-cmake-modules): el módulo de CMake base que necesita CUALQUIER
+# paquete de KDE Frameworks/Plasma para configurarse -- confirmado en vivo
+# bajando su tarball real de la 6.29.0 (extra-cmake-modules-6.29.0.tar.xz).
+# BLOQUEANTE real encontrado: su propio CMakeLists.txt pide
+# "cmake_minimum_required(VERSION 3.29)" -- el cmake de apt de este proyecto
+# (Debian bookworm) es 3.25.1, no alcanza (confirmado con "cmake --version"
+# real adentro del contenedor). Mismo criterio que meson/Rust: cmake más
+# nuevo por pip en el Dockerfile (ver comentario ahí), no depender de la
+# versión de apt.
+export ECM_VERSION="${KDE_VERSION}"
+#
+# iso-codes: prerequisito real de ki18n (Tier 2 KF6) -- paquete de datos de
+# códigos ISO de idiomas/países/monedas. Upstream real es salsa.debian.org
+# (Debian iso-codes-team), no un mirror -- confirmado bajando el tag real
+# v4.20.1 en vivo (extrae a "iso-codes-v4.20.1/", el archive de GitLab SÍ
+# mantiene el prefijo "v" en el nombre, a diferencia de GitHub).
+export ISOCODES_VERSION="4.20.1"
+#
+# PlasmaWaylandProtocols: prerequisito real de kguiaddons/kidletime/
+# kwindowsystem (Tier 2 KF6) para su soporte Wayland -- NO es parte del
+# tren de KDE Frameworks (versionado aparte) y no tiene tarball en
+# download.kde.org/stable/plasma/ pese a aparecer listado ahí (confirmado
+# 404 real). Fuente real: mirror de GitHub KDE/plasma-wayland-protocols
+# -- mismo patrón archive/refs/tags que ya usa este proyecto para paquetes
+# sin tarball de "make dist" (libxkbcommon, glslang).
+# Bump real 2026-09-16: KWayland (Tier 3) pide >= 1.22.0 -- más nuevo que
+# el 1.21.0 fijado originalmente para kwin. Confirmado tag real v1.22.0
+# (10-sep-2026) en github.com/KDE/plasma-wayland-protocols/tags -- se
+# sube el pin entero del proyecto a 1.22.0 (satisface también a kwin, que
+# sólo pide >= 1.21.0) y se recompila el paso una vez.
+export PLASMA_WAYLAND_PROTOCOLS_VERSION="1.22.0"
+#
+# zstd: prerequisito real de karchive (Tier 2 KF6), encontrado en la
+# corrida real -- confirmado tag/release real v1.5.7 de facebook/zstd.
+export ZSTD_VERSION="1.5.7"
+#
+# liblzma (xz): SEGUNDO prerequisito real de karchive, encontrado en la
+# corrida real inmediatamente después de zstd -- confirmado release real
+# v5.8.3 de tukaani-project/xz (el upstream real del proyecto).
+export LIBLZMA_VERSION="5.8.3"
+#
+# libtool (libltdl): prerequisito real de libcanberra, encontrado en la
+# corrida real -- sólo se compila el subdirectorio libltdl/, no el
+# libtool completo (el script libtool/ltmain.sh que ya usa cada
+# ./configure de este proyecto es otra cosa, generado por autoreconf en
+# cada paquete). Última release real de GNU (ftp.gnu.org/gnu/libtool).
+export LIBTOOL_VERSION="2.6.2"
+#
+# libcanberra: prerequisito REQUIRED real de knotifications (Tier 2b KF6),
+# no opcional como se había anotado originalmente para plasma-workspace.
+# El proyecto está congelado en 0.30 desde hace años (mismo release que
+# usa Debian hoy, confirmado contra sources.debian.org) -- no hay ningún
+# fork "oficial" más nuevo.
+export LIBCANBERRA_VERSION="0.30"
+#
+# libogg + libvorbis: prerequisitos reales de libcanberra ("Vorbis
+# (mandatory)" en su configure.ac), encontrados en la corrida real.
+# Últimas releases reales de Xiph.Org.
+export LIBOGG_VERSION="1.3.6"
+export LIBVORBIS_VERSION="1.3.7"
+#
+# Decisión XWayland/X11 (2026-09-04): SACADO por completo, Wayland puro.
+# No es una preferencia técnica improvisada -- el propio documento
+# fundacional del proyecto (docs/LINSI-OS.pdf, Pilar 5 "Vanguardia",
+# sección 2.5) lo dice explícito: "en lugar de mantener compatibilidad con
+# X11 ... LINSI-OS se construye exclusivamente sobre Wayland", y la sección
+# 6 ("Originalidad") lo repite: "sin arrastrar compatibilidad con X11 ni
+# PulseAudio". kwin trae XWayland/X11 prendido por defecto
+# (KWIN_BUILD_X11=ON en su CMakeLists.txt real) -- cuando se llegue a
+# step_kwin(), va con KWIN_BUILD_X11=OFF a propósito, sin libxcb/Xwayland en
+# el sysroot.
+
+# Plasma (el "tren de Plasma", Tier 3): versionado APARTE de KDE Frameworks
+# -- confirmado listando en vivo download.kde.org/stable/plasma/, la última
+# versión REALMENTE publicada ahí es 6.7.4 (2026-08-04), release posterior a
+# 6.7.0-6.7.3 y a toda la serie 6.6.x. Sus CMakeLists.txt reales (libplasma,
+# plasma-activities) piden KF6_MIN_VERSION 6.26.0 -- el 6.29.0 ya compilado
+# en este proyecto lo supera cómodo. Mismo tarball-naming que KF6:
+# "<paquete>-6.7.4.tar.xz" bajo download.kde.org/stable/plasma/6.7.4/.
+export PLASMA_VERSION="6.7.4"
+
+# KirigamiAddons (Tier 3): versionado APARTE del tren de Plasma Y de KDE
+# Frameworks -- su propio ciclo de release independiente, confirmado
+# listando en vivo download.kde.org/stable/kirigami-addons/ (última
+# versión real: 1.13.1, 2026-07-20). Repo real bajo "libraries/" en
+# invent.kde.org, no "frameworks/" (donde 404 primero).
+export KIRIGAMI_ADDONS_VERSION="1.13.1"
+
+# libnl (Tier 3): prerequisito real REQUIRED de libksysguard ("Used for
+# gathering socket info via the sock_diag netlink subsystem", confirmado
+# contra su CMakeLists.txt real). Última release real:
+# github.com/thom311/libnl/releases, tag "libnl3_12_0" (04-dic-2025).
+export LIBNL_VERSION="3.12.0"
+
+# lm-sensors / libsensors (Tier 3): prerequisito real REQUIRED de
+# libksysguard ("Used for reading hardware sensors"). Build system NO
+# estándar (ni autotools ni CMake ni Meson) -- Makefile plano propio,
+# cross-compilable pisando CC/AR por línea de comandos (confirmado
+# leyendo el Makefile real: "CC := gcc", sin ningún --host= de por
+# medio). Última tag real: github.com/lm-sensors/lm-sensors/tags,
+# "V3-6-2" (13-ene-2024) -- el proyecto no tuvo release nueva desde
+# entonces, no es que se haya fijado una vieja a propósito.
+export LMSENSORS_VERSION="3.6.2"
+
+# libepoxy (Tier 3): prerequisito real REQUIRED de kwin (dispatch de
+# funciones GL/GLES/EGL en tiempo de ejecución) -- confirmado contra el
+# CMakeLists.txt real de kwin. Meson, sin dependencias obligatorias
+# (EGL/GL/X11 opcionales, confirmado contra su meson.build real). Última
+# release real: github.com/anholt/libepoxy/releases, "1.5.10"
+# (18-mar-2024). Sin tarball de "make dist" real (no hace falta, es
+# Meson, el meson.build ya está en el repo) -- se usa el archive crudo
+# del tag, que NO pisa nada porque el tag no tiene prefijo "v" (extrae a
+# "libepoxy-1.5.10/" tal cual, confirmado en vivo).
+export LIBEPOXY_VERSION="1.5.10"
+
+# lcms2 / Little CMS (Tier 3): prerequisito real REQUIRED de kwin
+# (gestión de color). Autotools, tarball real de "make dist" (no un
+# archive crudo de tag). Última release real:
+# github.com/mm2/Little-CMS/releases, tag "lcms2.19.1" (06-may-2025) --
+# nombre de tag inusual (con punto en vez de guion), confirmado en vivo
+# vía el enlace de descarga real del asset:
+# ".../releases/download/lcms2.19.1/lcms2-2.19.1.tar.gz".
+export LCMS2_VERSION="2.19.1"
+export LCMS2_TAG="lcms2.19.1"
+
+# libdisplay-info (Tier 3): prerequisito real REQUIRED de kwin (parseo de
+# EDID/DisplayID de monitores, >= 0.2.0 según kwin). Meson, sin
+# dependencias (confirmado). Última release real: 0.4.0 (jul-2026),
+# fuente real gitlab.freedesktop.org/emersion/libdisplay-info (bloqueado
+# por robots.txt en el sandbox de research vía navegador, pero la URL de
+# descarga directa puede funcionar igual desde el contenedor -- si falla,
+# hay un mirror de GitHub de terceros: github.com/sepnic/libdisplay-info).
+export LIBDISPLAYINFO_VERSION="0.4.0"
+
+# hwdata (Tier 3): prerequisito real REQUIRED de libdisplay-info --
+# descubierto recién al intentar el build real ("File
+# /usr/share/hwdata/pnp.ids does not exist"), no estaba en ningún mapa
+# anterior. Pura data (pci.ids/usb.ids/pnp.ids, sin código que compilar),
+# Makefile propio con un ./configure real (no autoconf, un script shell
+# custom, "prefix=/usr" ya es el default). Última release real:
+# github.com/vcrhonek/hwdata/releases, tag "v0.411" (04-sep-2026).
+export HWDATA_VERSION="0.411"
+
+# Vulkan-Headers + Vulkan-Loader (Tier 4, kwin): "find_package(Vulkan
+# REQUIRED)" real de kwin, descubierto recién al intentar el build real
+# de kwin ("Could NOT find Vulkan"). Se creía cubierto por Mesa (Fase 6
+# Parte 2) pero Mesa sólo instala los DRIVERS ICD (libvulkan_radeon.so/
+# libvulkan_intel.so + los manifests /usr/share/vulkan/icd.d/*.json) --
+# el LOADER real (libvulkan.so, lo que las apps linkean, que dlopen-ea
+# el ICD correcto en runtime) y los headers (vulkan/vulkan.h) son DOS
+# proyectos aparte de KhronosGroup, nunca compilados. Sin CMakeLists.txt
+# real leído (invent.kde.org no aplica acá, son repos de Khronos, no de
+# KDE) -- confirmado contra github.com/KhronosGroup/Vulkan-Headers y
+# Vulkan-Loader directamente. Ambos taggean en lockstep con el mismo
+# número de versión (confirmado: la tag más reciente de los dos es
+# idéntica, "v1.4.362" al momento de fijar este pin) -- se usa la más
+# reciente de ambos ya que no están atados a ningún tren de KDE/Plasma.
+export VULKAN_HEADERS_VERSION="1.4.362"
+export VULKAN_LOADER_VERSION="1.4.362"
+
+# libxcvt (Tier 4, kwin): "pkg_check_modules(Libxcvt IMPORTED_TARGET
+# libxcvt>=0.1.1 REQUIRED)" real de kwin (CMakeLists.txt:334) --
+# descubierto igual que Vulkan, recién al CORRER el build real de kwin
+# (no estaba en el mapa de find_package() original porque es
+# pkg_check_modules, no find_package). Pese al nombre (viene del mundo
+# Xorg/DRM), es sólo la librería del algoritmo VESA CVT para generar
+# modelines de video -- matemática pura, sin ningún vínculo con X11/XCB
+# real (confirmado leyendo su meson.build real: única dep es libm).
+# gitlab.freedesktop.org bloquea la navegación (Anubis) pero la
+# descarga directa del tarball SÍ funciona (mismo caso ya documentado
+# para libdisplay-info) -- confirmado con un wget real. Última versión
+# real: Arch Linux empaqueta 0.1.3 (gitlab.freedesktop.org/xorg/lib/
+# libxcvt no lista releases navegables por el bloqueo de Anubis).
+export LIBXCVT_VERSION="0.1.3"
+
+# QCoro6 (Tier 5, plasma-workspace): "find_package(QCoro6 REQUIRED
+# COMPONENTS Core)" real (CMakeLists.txt de plasma-workspace 6.7.4) --
+# wrapper de corutinas de C++20 sobre Qt6 (github.com/danvratil/qcoro),
+# proyecto independiente sin ningún tren de KDE/Qt. Última tag real:
+# v0.13.0.
+export QCORO_VERSION="0.13.0"
+
+# ICU4C (Tier 5, plasma-workspace): "find_package(ICU COMPONENTS i18n
+# uc)" con TYPE REQUIRED real. Build autotools de dos pasadas para
+# cross-compilar (documentado oficialmente en unicode-org.github.io/
+# icu/userguide/icu4c/build.html): primero un build NATIVO completo
+# (con "runConfigureICU Linux"), después el build cruzado real pasando
+# "--with-cross-build=<dir del build nativo>" -- ICU necesita las
+# herramientas nativas compiladas (genrb, gennorm2, etc.) para generar
+# datos durante SU PROPIO build cruzado, no sólo para correr. Última
+# release real: 78.3 (unicode-org/icu, tag "release-78.3"; el asset de
+# fuentes completas es "icu4c-78.3-sources.tgz", confirmado con el
+# Browser tool ya que la lista de assets de GitHub no carga vía
+# WebFetch -- mismo caso ya visto con libepoxy/lcms2).
+export ICU_VERSION="78.3"
+
+# libqrencode (Tier 5, Prison -- dependencia real de plasma-workspace):
+# "find_package(QRencode)" SIEMPRE REQUIRED en Prison (sin ninguna
+# opción para sacarlo), confirmado contra su CMakeLists.txt real
+# (invent.kde.org/frameworks/prison). Proyecto independiente
+# (github.com/fukuchi/libqrencode), última tag real: v4.1.1.
+export LIBQRENCODE_VERSION="4.1.1"
+
+# libgpg-error + libgcrypt (Tier 5, KWallet -- dependencia real de
+# plasma-workspace): "find_package(LibGcrypt 1.5.0 REQUIRED)" real en
+# src/runtime/kwalletbackend/CMakeLists.txt ("kwalletd needs libgcrypt
+# to perform PBKDF2-SHA512 hashing") -- confirmado que NO es opcional
+# (a diferencia de Gpgmepp/GPGME, que sí lo es -- "if (Gpgmepp_FOUND)",
+# sin REQUIRED -- se deja sin construir, wallet vía GPG queda
+# deshabilitado, sólo el backend gcrypt clásico). Ambos son releases
+# clásicas de GnuPG (gnupg.org/ftp/gcrypt/), Autotools puro.
+export LIBGPGERROR_VERSION="1.61"
+export LIBGCRYPT_VERSION="1.12.4"
+
+# libsecret (Tier 5, KWallet -- dependencia real de plasma-workspace):
+# "pkg_check_modules(LIBSECRET REQUIRED libsecret-1)" real en
+# src/runtime/kwalletd/CMakeLists.txt, sin ninguna opción para
+# sacarlo. Proyecto GNOME (download.gnome.org/sources/libsecret/) --
+# convención de versionado GNOME clásica: minor PAR = estable ("0.20"),
+# minor IMPAR = desarrollo ("0.21", visto en el listado real pero
+# descartado a propósito). Última estable real: 0.20.5 (confirmado con
+# el archivo "LATEST-IS-0.20.5" real del servidor). Meson, deps reales
+# (glib-2.0/gio-2.0/gio-unix-2.0, ya en el sysroot desde fases
+# anteriores; libgcrypt, recién construido) -- soporte TPM2 (tss2-*) es
+# opcional y no se pide.
+export LIBSECRET_VERSION="0.20.5"
+
+# libndp (Tier 5, NetworkManager -- dependencia real de
+# KF6NetworkManagerQt): "dependency('libndp')" SIEMPRE REQUIRED (sin
+# "required: false") en el meson.build real de NetworkManager --
+# implementa IPv6 Neighbor Discovery Protocol. Proyecto chico e
+# independiente (github.com/jpirko/libndp), Autotools con
+# "autogen.sh" (el tarball de GitHub no trae "configure" pre-generado,
+# hace falta "autoreconf"). Última tag real: v1.9.
+export LIBNDP_VERSION="1.9"
+
+# NetworkManager (Tier 5): "pkg_search_module(NetworkManager REQUIRED
+# IMPORTED_TARGET libnm>=1.4.0)" real en KF6NetworkManagerQt -- sin
+# ninguna opción para evitarlo en Linux. Meson. Se compila con el
+# máximo de subsistemas opcionales apagados (wifi se deja, no agrega
+# dependencia dura real; ppp/modem_manager/ovs/nmtui/nm_cloud_setup/
+# introspection/vapi/qt/tests/docs apagados -- ninguno tiene consumidor
+# real todavía) para minimizar superficie, ya que sólo hace falta la
+# librería cliente "libnm" para que KF6NetworkManagerQt compile, no
+# NetworkManager funcionando de verdad como daemon de red del sistema
+# (eso queda pendiente de decisión aparte, fuera del alcance de
+# "hacer compilar Fase 6 Parte 3"). Real última estable (par, según
+# convención de versionado de NetworkManager -- impar = desarrollo):
+# 1.50.0 (download.gnome.org/sources/NetworkManager/1.50/, confirmado
+# con el archivo "LATEST-IS-1.50.0" real).
+export NETWORKMANAGER_VERSION="1.50.0"
+
+# polkit-qt-1 (Tier 5, plasma-workspace): "find_package(PolkitQt6-1)"
+# con TYPE REQUIRED real ("Communicate with localegen helper in region
+# & lang kcm"). Proyecto independiente (download.kde.org/stable/
+# polkit-qt-1/, sin carpeta de versión que siga KDE_VERSION) -- Qt6
+# Core/DBus/Widgets nada más, todo ya en el sysroot.
+export POLKITQT1_VERSION="0.201.1"
+
+# libxcb (Tier 3, retrofit real 2026-09-04): libplasma v6.7.4 tiene un bug
+# real de upstream -- src/plasma/private/blureffectwatcher_p.h hace
+# "#include <xcb/xcb.h>" SIN ningún guard de preprocesador, aunque el uso
+# real de X11 en ese archivo sí está guardeado con "#if HAVE_X11"
+# (confirmado leyendo el archivo real de la tag v6.7.4 en invent.kde.org).
+# Como este proyecto no define HAVE_X11 en ningún lado (decisión Wayland
+# puro, ver más arriba), ese código queda deshabilitado en runtime -- pero
+# el header igual hace falta para que compile. Se decidió (con el usuario)
+# compilar un libxcb real y mínimo (sin XWayland, sin Xlib, sin servidor
+# X) sólo para satisfacer este include -- nunca se linkea en runtime real.
+# Cadena de dependencias real (xorg.freedesktop.org, accesible en vivo a
+# diferencia de gitlab.freedesktop.org): xorgproto (headers puros) ->
+# libXau + libXdmcp (bases de autenticación X, paquetes chicos) ->
+# xcb-proto (specs XML + módulo python "xcbgen", sin código compilado) ->
+# libxcb en sí. Versiones: últimas reales publicadas en
+# xorg.freedesktop.org/archive/individual/ (confirmado en vivo listando
+# ese directorio).
+export XORGPROTO_VERSION="2025.1"
+export LIBXAU_VERSION="1.0.12"
+export LIBXDMCP_VERSION="1.1.5"
+export XCBPROTO_VERSION="1.17.0"
+export LIBXCB_VERSION="1.17.0"
 
 # --- Rutas --------------------------------------------------------------------
 export LFS="${LFS:-/lfs}"
@@ -587,6 +899,14 @@ export XKEYBOARD_CONFIG_MIRROR="https://xorg.freedesktop.org/archive/individual/
 export LIBINPUT_MIRROR="https://gitlab.freedesktop.org/libinput/libinput/-/archive/${LIBINPUT_VERSION}"
 # libxkbcommon: sin tarball de "make dist" -- archive/refs/tags crudo de GitHub.
 export LIBXKBCOMMON_MIRROR="https://github.com/xkbcommon/libxkbcommon/archive/refs/tags"
+# libxml2: el repo canónico es gitlab.gnome.org/GNOME/libxml2 (SÍ accesible
+# desde este sandbox de research, a diferencia de gitlab.freedesktop.org --
+# confirmado en vivo, no asumido); se usa igual el mirror de GitHub
+# (GNOME/libxml2) por consistencia con el resto del proyecto, que ya pulls
+# archive/refs/tags crudo de GitHub para varios paquetes (libxkbcommon,
+# glslang) -- tarball real bajado y confirmado (sha256 en LIBXML2_VERSION
+# de más arriba, extrae a "libxml2-2.15.3/").
+export LIBXML2_MIRROR="https://github.com/GNOME/libxml2/archive/refs/tags"
 export ALSA_LIB_MIRROR="https://www.alsa-project.org/files/pub/lib"
 export LUA_MIRROR="https://www.lua.org/ftp"
 export PIPEWIRE_MIRROR="https://gitlab.freedesktop.org/pipewire/pipewire/-/archive/${PIPEWIRE_VERSION}"
@@ -618,6 +938,74 @@ export SPIRV_LLVM_TRANSLATOR_MIRROR="https://github.com/KhronosGroup/SPIRV-LLVM-
 # elfutils: mismo tarball oficial que usan LFS/BLFS, "<version>/elfutils-<version>.tar.bz2"
 # dentro de esta base (ver VERIFICAR en el comentario de versión más arriba).
 export ELFUTILS_MIRROR="https://sourceware.org/elfutils/ftp"
+
+# KDE Frameworks/Plasma: tarballs oficiales reales de KDE (download.kde.org,
+# accesible en vivo desde este sandbox), NO un mirror de GitHub como el resto
+# de Fase 6 -- confirmado bajando extra-cmake-modules-6.29.0.tar.xz real desde
+# acá. Estructura real: <base>/<tren>/<paquete>-<versión>.tar.xz.
+export KDE_FRAMEWORKS_MIRROR="https://download.kde.org/stable/frameworks/6.29"
+# Plasma (Tier 3): mismo dominio real que KDE Frameworks, tren de versión
+# aparte -- ver comentario de PLASMA_VERSION más arriba. Estructura real
+# confirmada en vivo: <base>/<paquete>-<versión>.tar.xz.
+export PLASMA_MIRROR="https://download.kde.org/stable/plasma/${PLASMA_VERSION}"
+# Sin subcarpeta de versión (a diferencia de Plasma) -- confirmado
+# listando en vivo: los tarballs están planos bajo este mismo directorio.
+export KIRIGAMI_ADDONS_MIRROR="https://download.kde.org/stable/kirigami-addons"
+export LIBNL_MIRROR="https://github.com/thom311/libnl/releases/download/libnl3_12_0"
+export LMSENSORS_MIRROR="https://github.com/lm-sensors/lm-sensors/archive/refs/tags"
+export LIBEPOXY_MIRROR="https://github.com/anholt/libepoxy/archive/refs/tags"
+export LCMS2_MIRROR="https://github.com/mm2/Little-CMS/releases/download/${LCMS2_TAG}"
+export LIBDISPLAYINFO_MIRROR="https://gitlab.freedesktop.org/emersion/libdisplay-info/-/releases/${LIBDISPLAYINFO_VERSION}/downloads"
+export HWDATA_MIRROR="https://github.com/vcrhonek/hwdata/archive/refs/tags"
+export VULKAN_HEADERS_MIRROR="https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags"
+export VULKAN_LOADER_MIRROR="https://github.com/KhronosGroup/Vulkan-Loader/archive/refs/tags"
+export LIBXCVT_MIRROR="https://gitlab.freedesktop.org/xorg/lib/libxcvt/-/archive/libxcvt-${LIBXCVT_VERSION}"
+export QCORO_MIRROR="https://github.com/danvratil/qcoro/archive/refs/tags"
+export ICU_MIRROR="https://github.com/unicode-org/icu/releases/download/release-${ICU_VERSION}"
+export LIBQRENCODE_MIRROR="https://github.com/fukuchi/libqrencode/archive/refs/tags"
+export LIBGPGERROR_MIRROR="https://www.gnupg.org/ftp/gcrypt/libgpg-error"
+export LIBGCRYPT_MIRROR="https://www.gnupg.org/ftp/gcrypt/libgcrypt"
+export LIBSECRET_MIRROR="https://download.gnome.org/sources/libsecret/0.20"
+export LIBNDP_MIRROR="https://github.com/jpirko/libndp/archive/refs/tags"
+export NETWORKMANAGER_MIRROR="https://download.gnome.org/sources/NetworkManager/1.50"
+export POLKITQT1_MIRROR="https://download.kde.org/stable/polkit-qt-1"
+# libxcb y su cadena de dependencias: xorg.freedesktop.org, accesible en
+# vivo (a diferencia de gitlab.freedesktop.org) -- ver comentario real de
+# versión más arriba. Tres subdirectorios reales distintos del mismo
+# archivo ("proto", "lib", "xcb"), confirmado listando cada uno en vivo.
+export XORGPROTO_MIRROR="https://xorg.freedesktop.org/archive/individual/proto"
+export XORG_LIB_MIRROR="https://xorg.freedesktop.org/archive/individual/lib"
+export XCB_MIRROR="https://xorg.freedesktop.org/archive/individual/xcb"
+# iso-codes: upstream real (salsa.debian.org), no un mirror -- ver
+# comentario de versión más arriba. Base para "/v<version>/iso-codes-v<version>.tar.gz".
+export ISOCODES_MIRROR="https://salsa.debian.org/iso-codes-team/iso-codes/-/archive"
+# PlasmaWaylandProtocols: mirror de GitHub, ver comentario de versión más
+# arriba. Archive crudo por tag, GitHub SÍ pisa el "v" al armar el
+# directorio (confirmado: extrae a "plasma-wayland-protocols-1.21.0/").
+export PLASMA_WAYLAND_PROTOCOLS_MIRROR="https://github.com/KDE/plasma-wayland-protocols/archive/refs/tags"
+# zstd: release real de GitHub (tarball "make dist", no un archive crudo).
+export ZSTD_MIRROR="https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}"
+# liblzma (xz): release real de GitHub (tukaani-project/xz), tarball
+# "make dist" real, no un archive crudo.
+export LIBLZMA_MIRROR="https://github.com/tukaani-project/xz/releases/download/v${LIBLZMA_VERSION}"
+# libcanberra: upstream real (0pointer.de, la web personal de Lennart
+# Poettering) -- confirmado en vivo, tarball real "make dist" con
+# configure ya generado. gitlab.freedesktop.org NO tiene este proyecto
+# bajo el namespace "0pointer" pese a que muchas referencias antiguas lo
+# dan por hecho (probado 404 real) -- éste es el mirror correcto.
+export LIBCANBERRA_MIRROR="https://0pointer.de/lennart/projects/libcanberra"
+# libtool: release oficial real de ftp.gnu.org.
+export LIBTOOL_MIRROR="https://ftp.gnu.org/gnu/libtool"
+# libogg/libvorbis: releases oficiales reales de Xiph.Org.
+export LIBOGG_MIRROR="https://downloads.xiph.org/releases/ogg"
+export LIBVORBIS_MIRROR="https://downloads.xiph.org/releases/vorbis"
+
+# Qt6: tarballs oficiales reales de Qt (download.qt.io, confirmado en vivo
+# con la URL real de qtbase-everywhere-src-6.11.2.tar.xz -- HTTP 200,
+# redirige a un mirror real vía MirrorBrain, mismo mecanismo que ya usa
+# download.kde.org). Estructura real:
+# <base>/<X.Y>/<X.Y.Z>/submodules/<módulo>-everywhere-src-<X.Y.Z>.tar.xz
+export QT6_MIRROR="https://download.qt.io/official_releases/qt/6.11/${QT6_VERSION}/submodules"
 
 # --- Cargo (Fase 2, uutils) ----------------------------------------------------
 # CARGO_HOME por default es ~/.cargo (home del usuario "linsi" dentro del
