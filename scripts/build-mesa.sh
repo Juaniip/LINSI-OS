@@ -1556,18 +1556,50 @@ step_verify_mesa() {
     log "Verificación: drivers de Mesa (Gallium + Vulkan) en el sysroot"
     local ok=1
     local p
-    # swrast_dri.so es el nombre correcto del .so instalado por la opción de
-    # meson "llvmpipe" (confirmado contra el meson.build real de Mesa,
-    # target dri) -- el nombre del archivo no cambió aunque el nombre de la
-    # opción sí, no es una inconsistencia.
-    for p in \
-        "${LFS_SYSROOT}/usr/lib/dri/iris_dri.so" \
-        "${LFS_SYSROOT}/usr/lib/dri/radeonsi_dri.so" \
-        "${LFS_SYSROOT}/usr/lib/dri/nouveau_dri.so" \
-        "${LFS_SYSROOT}/usr/lib/dri/swrast_dri.so"
-    do
-        if [[ -e "${p}" ]]; then echo "  [OK] ${p}"; else echo "  [FALTA] ${p}"; ok=0; fi
-    done
+    # Vigésimo cuarto error real (2026-09-04) -- falso negativo de ESTE
+    # verify, no un fallo de build: el chequeo original buscaba
+    # iris_dri.so/radeonsi_dri.so/nouveau_dri.so/swrast_dri.so en
+    # ${LFS_SYSROOT}/usr/lib/dri/, asumiendo el esquema clásico de
+    # "megadriver" con un símlink por vendor (el que arma
+    # bin/install_megadrivers.py). Confirmado leyendo el meson.build REAL
+    # de Mesa (mirror/mesa, rama main, mismo mecanismo en 26.2.1):
+    # src/gallium/targets/dri/meson.build sólo invoca install_megadrivers
+    # para los VA drivers (gated por with_gallium_va, que este proyecto
+    # deja en "disabled" -- ver -Dgallium-va=disabled más arriba) -- para
+    # el gallium DRI "clásico" (OpenGL/EGL) NO arma ningún símlink
+    # *_dri.so; sólo instala UN .so combinado con todos los drivers
+    # linkeados adentro, "libgallium-${MESA_VERSION}.so", directo en
+    # ${prefix}/${libdir} (sin "/dri"). Ese esquema de símlinks por
+    # vendor sólo lo consume el loader clásico de GLX/X11
+    # (loader_open_driver_lib() en src/loader/loader.c, que arma
+    # "<path>/<driver_name>_dri.so" a mano) -- y este proyecto compila con
+    # -Dglx=disabled -Dplatforms=wayland, así que ese loader ni se
+    # construye. Confirmado que el camino real que sí usa este proyecto
+    # (Wayland vía EGL + GBM) linkea el .so combinado DIRECTO en tiempo de
+    # build, sin dlopen por nombre de vendor: src/egl/meson.build tiene
+    # "if with_dri: link_for_egl += libgallium_dri" (libEGL.so linkea el
+    # megadriver entero) y src/gbm/backends/dri/meson.build tiene
+    # "link_with : [libloader, libgallium_dri]" en el shared_library de
+    # dri_gbm.so (la backend de GBM que usa Wayland). Por eso el build real
+    # (ver logs/20260904-060402_build-mesa_mesa.log, 2872/2872 + 76/76
+    # ninja sin ningún error) sí instaló libgallium-26.2.1.so,
+    # libvulkan_radeon.so, libvulkan_intel.so y libEGL.so -- Mesa está
+    # completo para esta configuración -- pero este verify seguía
+    # buscando archivos que Mesa nunca tuvo intención de generar acá.
+    # Corregido para chequear el artefacto real: libgallium-${MESA_VERSION}.so
+    # en ${LFS_SYSROOT}/usr/lib (con los 4 drivers Gallium linkeados
+    # adentro) y dri_gbm.so en ${LFS_SYSROOT}/usr/lib/gbm (la backend que
+    # efectivamente consume ese .so para Wayland/EGL).
+    if [[ -e "${LFS_SYSROOT}/usr/lib/libgallium-${MESA_VERSION}.so" ]]; then
+        echo "  [OK] ${LFS_SYSROOT}/usr/lib/libgallium-${MESA_VERSION}.so (iris+radeonsi+nouveau+llvmpipe linkeados adentro)"
+    else
+        echo "  [FALTA] ${LFS_SYSROOT}/usr/lib/libgallium-${MESA_VERSION}.so"; ok=0
+    fi
+    if [[ -e "${LFS_SYSROOT}/usr/lib/gbm/dri_gbm.so" ]]; then
+        echo "  [OK] ${LFS_SYSROOT}/usr/lib/gbm/dri_gbm.so"
+    else
+        echo "  [FALTA] ${LFS_SYSROOT}/usr/lib/gbm/dri_gbm.so"; ok=0
+    fi
     for p in \
         "${LFS_SYSROOT}/usr/lib/libvulkan_radeon.so" \
         "${LFS_SYSROOT}/usr/lib/libvulkan_intel.so"
