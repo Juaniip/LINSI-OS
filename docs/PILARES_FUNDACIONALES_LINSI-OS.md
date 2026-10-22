@@ -107,7 +107,7 @@ descartando código heredado y obsoleto.
 
 ---
 
-## Nota de estado (situación real al 2026-09-02)
+## Nota de estado (situación real al 2026-09-15)
 
 Para que este documento no quede desactualizado respecto de lo que
 efectivamente se construyó, un mapeo rápido pilar por pilar contra el avance
@@ -117,6 +117,8 @@ real (ver `PENDIENTES.md` para el detalle completo):
   uutils, SELinux, nftables, auditd). Secure Boot real (enrolado de clave)
   queda para la Fase 8, todavía no llegamos ahí. Fase 5 (firma de paquetes)
   escrita pero sin confirmar ejecutada. Wayland (Fase 6 Parte 1) completo;
+  **el pilar Wayland-puro se sostuvo activamente incluso frente a bugs
+  reales de KDE que asumían X11 disponible** (ver Fase 6 Parte 3 abajo);
   Flatpak (Fase 7) no empezado.
 - **Privacidad:** Fases 3 y 4 completas y confirmadas (LUKS2+Argon2id,
   MAC random, DNS-over-TLS). Los navegadores endurecidos de Fase 7 todavía
@@ -126,12 +128,21 @@ real (ver `PENDIENTES.md` para el detalle completo):
   La infraestructura autónoma de Fase 5 (Raspberry Pi + Cloudflare Tunnel)
   sigue sin confirmación real de estar levantada.
 - **Estética:** todavía no se llegó a Zsh+Starship (Fase 2 se compiló con
-  Zsh pero sin Starship configurado explícitamente) ni a KDE Plasma 6 (Fase
-  6 Parte 3, no empezada) ni a Calamares (Fase 8, no empezada).
+  Zsh pero sin Starship configurado explícitamente) ni a Calamares (Fase 8,
+  no empezada), pero **KDE Plasma 6 (Fase 6 Parte 3) está en construcción
+  activa**: Qt6 completo, KDE Frameworks 6 completo (incluyendo KIO y
+  knewstuff), y del "tren de Plasma" ya están `libplasma`,
+  `PlasmaActivities`/`PlasmaActivitiesStats` compilados y verificados.
+  Falta el resto del tren de Plasma (KWayland, KSysGuard, KDecoration3,
+  etc.) y después kwin/plasma-workspace en sí. La base de aceleración de
+  hardware real vía Mesa/Vulkan para Intel/AMD/Nvidia (Fase 6 Parte 2) ya
+  está completa desde antes.
 - **Vanguardia:** PAM+FIDO2 completo y confirmado (Fase 4). Wayland+PipeWire
-  completo (Fase 6 Parte 1). El modelo Flatpak/Podman/Distrobox de Fase 7 no
-  empezó.
+  (Fase 6 Parte 1) y Mesa/Vulkan (Fase 6 Parte 2) completos y confirmados.
+  El modelo Flatpak/Podman/Distrobox de Fase 7 no empezó.
 
 En resumen: los pilares de Seguridad, Privacidad y Robustez tienen ya su
-base técnica más sólida construida; Estética y Vanguardia dependen todavía
-de fases que arrancan más adelante (6 Parte 3 en adelante).
+base técnica más sólida construida; Estética y Vanguardia tienen la base
+gráfica (Wayland + Mesa/Vulkan) completa y están construyendo activamente
+el escritorio en sí (Fase 6 Parte 3, Qt6/KDE Frameworks completos, tren de
+Plasma en progreso) — ver `PENDIENTES.md` para el detalle tier por tier.

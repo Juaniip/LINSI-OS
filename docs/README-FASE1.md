@@ -16,30 +16,24 @@ Move-Item "C:\Users\juani\Desktop\LINSIOS\linux-7.2.tar.xz" `
 ```
 
 `sources/` está bind-mounteada en `/lfs/sources` dentro del contenedor (ver
-`docker-compose.yml`), así que el build lo encuentra ahí directo — no lo
-vuelve a descargar. Lo único que hace es verificarle el sha256 contra el
-oficial de kernel.org (`scripts/env.sh`, `LINUX_SHA256`) antes de compilar.
+`docker-compose.yml` — el nombre del archivo quedó así desde antes de migrar
+a Podman, pero `podman-compose` lo lee igual), así que el build lo encuentra
+ahí directo — no lo vuelve a descargar. Lo único que hace es verificarle el
+sha256 contra el oficial de kernel.org (`scripts/env.sh`, `LINUX_SHA256`)
+antes de compilar.
 
 ## Comandos
 
 ```bash
 # 1. (si no lo hiciste ya) Fase 0: cross-toolchain
-make image
-make toolchain
+podman-compose build
+podman-compose run --rm builder scripts/build-cross-toolchain.sh all
 
 # 2. Fase 1: kernel endurecido
-make kernel
+podman-compose run --rm builder scripts/build-kernel.sh all
 ```
 
-Equivalente sin Makefile (por ejemplo desde PowerShell):
-
-```powershell
-docker compose build
-docker compose run --rm builder scripts/build-cross-toolchain.sh all
-docker compose run --rm builder scripts/build-kernel.sh all
-```
-
-Al terminar, `docker compose run --rm builder scripts/build-kernel.sh verify`
+Al terminar, `podman-compose run --rm builder scripts/build-kernel.sh verify`
 imprime un check de cada opción de hardening (OK/FALTA) para confirmar que
 quedaron aplicadas.
 
@@ -85,11 +79,11 @@ proyecto como *bind mount*, así que cualquier cambio en tu Windows se ve al
 instante adentro del contenedor:
 
 - `./scripts` → `/lfs/scripts` (de sólo lectura): si editás `kernel-hardening.config`
-  o cualquier `.sh`, el próximo `docker compose run` ya usa la versión nueva.
+  o cualquier `.sh`, el próximo `podman-compose run` ya usa la versión nueva.
 - `./patches` → `/lfs/patches` (de sólo lectura, hoy vacía): si más adelante
   necesitás parchear el kernel, dejás el `.patch` ahí y lo aplicás con
   `patch -p1 < /lfs/patches/tu-patch.patch` desde dentro del contenedor
-  (`make shell` para entrar).
+  (`podman-compose run --rm builder bash` para entrar).
 - `./sources` → `/lfs/sources` (lectura/escritura): acá va `linux-7.2.tar.xz`
   (ver arriba). Binutils y GCC, si no los dejás vos también, se descargan
   solos ahí adentro la primera vez y quedan cacheados para las próximas.

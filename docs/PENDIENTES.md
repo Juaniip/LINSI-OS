@@ -39,13 +39,25 @@ contestar de memoria. Resultado:
 
 ## Fase 5 — Infraestructura Autónoma
 
-- **`build-infra.sh` (apk-tools + firma) nunca se confirmó.** Se entregó,
-  `bash -n` limpio, pero no hay un log real ni un "listo" tuyo específico para
-  este script. Puede haber corrido bien en algún momento sin que lo
-  mencionaras — conviene correrlo (`scripts/build-infra.sh all`) y confirmar.
-- **Raspberry Pi: `setup-repo-server.sh` sin confirmar ejecutado.** Te di la
-  guía paso a paso por SSH, pero no hay confirmación de que hayas corrido el
-  script en la Pi ni de que nginx haya quedado sirviendo en el puerto 8088.
+Plan con tres partes, sólo la primera corre dentro del contenedor de build
+(ver el encabezado real de `scripts/build-infra.sh`):
+
+- **(a) apk-tools + firma — ✅ CONFIRMADO (2026-09-30), primera corrida real.**
+  `build-infra.sh all` corrido de punta a punta: `apk` 3.0.7 compilado e
+  instalado (linkeado contra libssl/libcrypto/libz, confirmado con
+  `readelf`), par RSA-4096 generado, pública instalada en
+  `/etc/apk/keys/`, `repositories` con el placeholder esperado. En el camino
+  salieron dos bugs reales (documentados en detalle en "Infraestructura de
+  build" más abajo): un falso positivo en `step_verify_apk_signing()` (el
+  `find` barría todo `/lfs`, incluida la privada en `/lfs/build` a
+  propósito) y, mucho más grave, que **`/lfs/etc` nunca tuvo volumen
+  persistente** — ya corregido agregando `linsios-etc:/lfs/etc` a
+  `docker-compose.yml`. Confirmado con un `find` real en un contenedor
+  NUEVO que todo sobrevive.
+- **(b) Servidor de repo en la Raspberry Pi** — `setup-repo-server.sh` sin
+  confirmar ejecutado. Te di la guía paso a paso por SSH, pero no hay
+  confirmación de que hayas corrido el script en la Pi ni de que nginx haya
+  quedado sirviendo en el puerto 8088.
 - **Cloudflare Tunnel: `cloudflared-ingress-snippet.yml` sin confirmar
   mergeado.** No sé si ya agregaste esa regla a tu `config.yml` real del túnel
   ni si corriste `cloudflared tunnel route dns`.
@@ -57,10 +69,30 @@ contestar de memoria. Resultado:
   herramientas remotas no pueden tocar `.github/` (protección esperada) — te
   lo entregué en el chat, pendiente que lo copies vos a mano a
   `linsi-os\.github\workflows\lint-scripts.yml`.
-- **CI/CD: pausado por decisión mutua, no resuelto.** Quedó sin definir qué
-  runner usar (GitHub hosteado vs. self-hosted en tu PC o en la Pi). Ver la
-  respuesta a tu pregunta de si hace falta tener la PC prendida 24/7, al final
-  de este archivo.
+- **(c) CI/CD — criterio de cadencia decidido (2026-09-30), runner sin
+  decidir todavía.** Dos triggers, no uno solo:
+  1. **On-push** — cualquier commit que toque `scripts/*.sh` o `env.sh`
+     dispara build de la fase afectada + verifies + (cuando exista Fase 7/8)
+     empaquetado `.apk` + firma con la llave RSA + publicación al repo de la
+     Pi. Frecuente ahora en desarrollo activo, esporádico una vez estable.
+  2. **Programado (mensual, propuesto)** — reconstrucción completa +
+     chequeo de versiones pinneadas en `env.sh` contra CVEs conocidos
+     (kernel/OpenSSL/glibc/etc.), incluso sin que nadie toque el repo.
+     Motivo: con el pilar de Seguridad de por medio, varios meses sin
+     reconstruir "porque ya está estable" puede significar meses con CVEs
+     conocidos sin parchear.
+  - **Runner: sigue sin decidir.** Técnicamente cualquiera sirve (todo corre
+    en contenedor, no hace falta hardware específico para el target
+    x86_64) — la duda es de costo/duración (builds de la escala de Qt6+KDE
+    de esta sesión tardaron horas, probablemente superan el free tier de
+    GitHub Actions). La Pi queda descartada como runner (ARM64, necesitaría
+    QEMU para x86_64, mucho más lento).
+  - **Alcance real hoy:** hasta que exista empaquetado `.apk` (Fase 7/8), el
+    job de CI construiría el sysroot y correría verifies, sin publicar
+    paquetes instalables reales a la Pi todavía.
+  - Sigue sin resolver si el runner es GitHub hosteado o self-hosted en tu
+    PC. Ver la respuesta a tu pregunta de si hace falta tener la PC prendida
+    24/7, al final de este archivo.
 
 ## Fase 6 — Parte 1 (fundación no gráfica) — ✅ COMPLETA (confirmada 2026-08-29)
 
@@ -242,19 +274,42 @@ las Partes 2/3.
   arriesgar un "Unknown option" adivinando. Si falta alguna funcionalidad más
   adelante, revisar ahí primero.
 
-## Fase 6 — Parte 2 (Mesa + LLVM, drivers gráficos) — 🟡 EN CURSO, corriendo de verdad (actualizado 2026-09-04)
+## Fase 6 — Parte 2 (Mesa + LLVM, drivers gráficos) — ✅ COMPLETA (confirmada 2026-09-04)
 
-Este título decía "script escrito, SIN CORRER TODAVÍA" desde el 2026-08-29 --
-quedó desactualizado, corregido ahora: llevamos varios días CORRIENDO el
-build real contra hardware/contenedor real, no iterando en el aire. La
-extensión de la sección de "errores reales" de acá abajo (23 entradas a esta
-fecha) es justamente el registro de esas corridas reales, no trabajo
-especulativo -- son los errores concretos que tira el build real, cada uno
-con su causa raíz confirmada contra la fuente real de Mesa/LLVM antes de
-tocar nada, no parches a ciegas. La gran mayoría ya están cerrados; sólo dos
-tramos tuvieron que corregirse a sí mismos después de resultar incompletos
-(Décimo octavo→Décimo noveno, y Décimo noveno parte 2→Vigésimo) -- señalado
-explícito en cada caso, no escondido.
+Este título pasó por "script escrito, SIN CORRER TODAVÍA" (2026-08-29) y
+"EN CURSO, corriendo de verdad" antes de esto -- cerrado ahora de verdad,
+con `verify-mesa` en `[OK]` de punta a punta contra el sysroot real
+(`logs/20260904-113651_build-mesa_verify-mesa.log`):
+
+```
+[OK] /lfs/usr/lib/libgallium-26.2.1.so (iris+radeonsi+nouveau+llvmpipe linkeados adentro)
+[OK] /lfs/usr/lib/gbm/dri_gbm.so
+[OK] /lfs/usr/lib/libvulkan_radeon.so
+[OK] /lfs/usr/lib/libvulkan_intel.so
+[OK] libEGL.so presente
+OK: Mesa completo en el sysroot.
+```
+
+El build real de Mesa (`ninja`+`ninja install`, ver
+`logs/20260904-060402_build-mesa_mesa.log`) ya había terminado 2872/2872 +
+76/76 targets sin un solo error desde antes -- lo que faltaba era el
+Vigésimo cuarto "error real" de más abajo, que en realidad era un falso
+negativo del propio `step_verify_mesa()`, no un problema de Mesa. Con eso
+corregido, las tres familias de GPU del laboratorio (Intel iris, AMD
+radeonsi/RADV, Nvidia nouveau + llvmpipe de fallback) quedan con drivers
+Gallium/Vulkan instalados y verificados en el sysroot. Sigue Fase 6 Parte 3
+(Qt6 + KDE), ver esa sección más abajo para el prerequisito ya identificado
+(libxml2 + reactivar `-Denable-xkbregistry=true`).
+
+La extensión de la sección de "errores reales" de acá abajo (24 entradas)
+es el registro completo de las corridas reales que llevaron hasta acá, no
+trabajo especulativo -- son los errores concretos que tiró el build real,
+cada uno con su causa raíz confirmada contra la fuente real de Mesa/LLVM
+antes de tocar nada, no parches a ciegas. La gran mayoría ya están
+cerrados; tres tramos tuvieron que corregirse a sí mismos después de
+resultar incompletos (Décimo octavo→Décimo noveno, Décimo noveno parte
+2→Vigésimo, y el propio verify en el Vigésimo cuarto) -- señalado explícito
+en cada caso, no escondido.
 
 - **Script nuevo:** `scripts/build-mesa.sh` (independiente de
   `build-desktop.sh`, mismo patrón de siempre: se basta a sí mismo, no
@@ -1517,17 +1572,1839 @@ explícito en cada caso, no escondido.
   gap se cierra en segundos (agregar un target a una lista existente), no
   en horas (no hace falta recompilar nada de lo ya hecho, sólo lo nuevo).
 
-## Fase 6 — Parte 3 (no empezada)
+- **Vigésimo cuarto "error real" (2026-09-04) — no fue un fallo de build de
+  Mesa, fue un falso negativo del propio `step_verify_mesa()`.** Con el
+  Vigésimo tercero ya corregido, la corrida real (`llvm-native` →
+  `mesa-clc-native` → `mesa` → `verify-mesa`) completó `ninja`/`ninja install`
+  de Mesa dos veces seguidas sin un solo error (`logs/20260904-060402_build-
+  mesa_mesa.log`: primero 2872/2872 targets, después 76/76 más por el
+  `git_sha1.h` siempre-stale de Meson arrastrando un puñado de recompilaciones
+  en cascada al correr `ninja install` — ninguna de las dos corridas tiene un
+  solo `FAILED`/`ERROR`) — pero `verify-mesa` igual reportó
+  `[FALTA] iris_dri.so / radeonsi_dri.so / nouveau_dri.so / swrast_dri.so`.
+
+  **Causa raíz confirmada** (leyendo el `meson.build` real de Mesa, mirror de
+  GitHub `mirror/mesa`, rama `main` — mismo mecanismo que 26.2.1 en este
+  tramo del árbol):
+  - `src/gallium/targets/dri/meson.build` compila UN solo `shared_library()`
+    con los 4 drivers Gallium (`iris`, `radeonsi`, `nouveau`, `llvmpipe`)
+    linkeados adentro (`dependencies: [... driver_iris, driver_radeonsi,
+    driver_nouveau, ...]`), lo instala directo en `${libdir}` (sin `/dri`)
+    con el nombre `libgallium-<versión>.so` (`libname_suffix` +
+    `meson.project_version()`) — confirmado en el log real:
+    `Installing src/gallium/targets/dri/libgallium-26.2.1.so to /lfs/usr/lib`.
+  - El ÚNICO `meson.add_install_script(install_megadrivers, ...)` de ese
+    archivo (el que arma los símlinks `<driver>_dri.so` → el .so combinado)
+    está condicionado por `with_gallium_va` — y este proyecto compila con
+    `-Dgallium-va=disabled` a propósito (VA-API fuera de scope, ver Fase 6
+    Parte 2 más arriba). Para el gallium DRI "clásico" (OpenGL/EGL, no VA) el
+    archivo simplemente NO arma ningún símlink `iris_dri.so`/etc. en ninguna
+    parte — nunca existió esa instalación para esta selección de opciones.
+  - Ese esquema de símlinks-por-vendor es lo que consume
+    `loader_open_driver_lib()` (`src/loader/loader.c` real: arma
+    `"<path>/<driver_name><suffix>.so"` a mano y hace `dlopen()`) — pero eso
+    es el loader del camino GLX/X11 clásico, y este proyecto compila con
+    `-Dglx=disabled -Dplatforms=wayland` (glvnd también disabled) — ese
+    loader ni se construye acá.
+  - El camino que sí importa (Wayland vía EGL + GBM) NO usa `dlopen()` por
+    nombre de vendor en absoluto: confirmado en `src/egl/meson.build` real
+    (`if with_dri: link_for_egl += libgallium_dri` — libEGL.so linkea el
+    megadriver COMPLETO en tiempo de build) y en
+    `src/gbm/backends/dri/meson.build` real (`link_with : [libloader,
+    libgallium_dri]` en el `shared_library('dri_gbm', ...)`, confirmado
+    instalado en el mismo log: `Linking target
+    src/gbm/backends/dri/dri_gbm.so` + `Installing ... dri_gbm.so to
+    /lfs/usr/lib/gbm`). O sea: para esta combinación de opciones
+    (Wayland-only, sin GLX), Mesa deliberadamente no genera los archivos que
+    el verify estaba buscando — no es que falten, es que la arquitectura de
+    esta build no los necesita ni los produce.
+
+  **Fix:** `step_verify_mesa()` corregido para chequear el artefacto real
+  (`${LFS_SYSROOT}/usr/lib/libgallium-${MESA_VERSION}.so`, con los 4 drivers
+  Gallium adentro) y su consumidor real de Wayland
+  (`${LFS_SYSROOT}/usr/lib/gbm/dri_gbm.so`), en vez de los 4 símlinks
+  `*_dri.so` que esta configuración de Mesa nunca instala. Los chequeos de
+  Vulkan (`libvulkan_radeon.so`/`libvulkan_intel.so`, ya `[OK]` antes — son
+  ICDs separados, ANV/RADV, no pasan por este mecanismo) y de `libEGL.so`
+  quedan intactos, no eran parte del problema. Sólo se corrigió `bash -n`
+  contra este cambio (limpio) — `shellcheck` no está disponible en este
+  entorno de trabajo puntual (ni en el host Windows ni en el `Dockerfile` del
+  proyecto); pendiente correrlo cuando haya un entorno con la herramienta a
+  mano, aclarado acá para no dar por hecho una validación que no se hizo.
+
+  **Lección:** ya es la tercera vez en Fase 6 (ver "Lección general" de la
+  Parte 1, sobre `.pc` en `share/` vs `lib/` y el symlink de xkeyboard-config)
+  que un `verify` propio asume una convención de instalación "de manual" en
+  vez de confirmar contra las líneas reales de `Installing .../` del log —
+  acá el costo fue peor porque el build real había terminado perfecto
+  (2872/2872, cero errores) y el mensaje "[FALTA]" sugería fuertemente lo
+  contrario. Antes de tratar un `[FALTA]` de un verify propio como una señal
+  de que el build falló, vale la pena confirmar primero si el build en sí
+  tiró algún error real (`grep -iE "error|FAILED"` sobre el log de build) —
+  si no tiró ninguno, el problema más probable es el verify, no el build.
+
+## Infraestructura — incidente real de disco (2026-09-04, no es un bug de build)
+
+Durante la primera corrida de `qttools` (build CRUZADO), el compilador tiró
+errores reales pero ENGAÑOSOS: `internal compiler error: Bus error` +
+`fatal error: error writing to /tmp/cc*.s: Input/output error`, repetido en
+decenas de archivos distintos de `src/designer/`. **No era un bug de GCC ni
+de Qt** — el disco C: de Windows llegó a **0 bytes libres** (893GB usados
+de ~893GB) mientras la VM de Podman (WSL2, `ext4.vhdx` dinámico) intentaba
+seguir creciendo para la compilación. Eso rompió escrituras a disco DENTRO
+de la VM a mitad de compilación, y terminó corrompiendo el filesystem raíz
+de la propia distro WSL (`podman-machine-default` quedó sin poder arrancar:
+`getpwnam(root) failed`, ni `wsl --shutdown` alcanzaba para repararla).
+
+**Diagnóstico, sin tomar ninguna acción destructiva:** confirmado con
+PowerShell (`Get-PSDrive`) y con `df -h` desde Git Bash en paralelo — cero
+bytes libres en C:, 232GB libres en D:. **Recuperación real:** se vació la
+papelera de reciclaje de Windows (`Clear-RecycleBin`, seguro, ya eran
+archivos que el usuario había marcado para borrar) — liberó 27.6GB, más de
+lo esperado. Con eso, `wsl --shutdown` + `podman machine start` volvió a
+funcionar sin problema, y se confirmó que **ningún dato se perdió** (los 4
+volúmenes con nombre de Podman —`linsios-tools`/`linsios-build`/
+`linsios-sysroot`/`linsios-boot`— y todo lo compilado hasta ahora,
+incluidos `libQt6Core.so` y `libgallium-26.2.1.so`, sobrevivieron intactos
+— la corrupción fue sólo del filesystem raíz de la distro en sí, no del
+overlay/volúmenes de datos).
+
+**Pendiente, decisión ya tomada (2026-09-04): NO mover la VM a D: todavía.**
+Se evaluó mudar el `ext4.vhdx` de la máquina Podman de C: a D: (232GB
+libres ahí) para eliminar el problema de raíz, pero esta versión de WSL
+(2.5.10.0) no tiene un comando de "mover en el lugar" — sólo
+`--export`/`--unregister`/`--import`, una secuencia de varios pasos sobre
+una VM recién recuperada de una corrupción, con riesgo real de dejarla peor
+si algo falla a mitad de camino. Se pospone a propósito para cuando haya
+tiempo de hacerlo con cuidado, sin build corriendo en paralelo — 27.6GB
+libres en C: alcanza para seguir compilando por ahora (el disco de la VM
+tiene margen hasta 100GB nominales, usa 67GB reales en C: al momento de
+este incidente). `powercfg /hibernate off` (libera otros ~20GB de
+`hiberfil.sys`) quedó identificado pero sin correr — necesita una terminal
+elevada (admin), esta sesión no tiene esos privilegios.
+
+**Lección para el futuro:** si vuelve a aparecer un error de compilación
+que mencione "Bus error", "Input/output error" al escribir en `/tmp`, o
+cualquier falla rara que no tenga que ver con el código en sí y que golpee
+archivos sin relación entre ellos, revisar espacio en disco del HOST
+(`Get-PSDrive` en PowerShell) antes de asumir que es un bug real del
+compilador o del proyecto que se esté compilando.
+
+## Tier 2 (KDE Frameworks 6) — mapa de dependencias real (research 2026-09-04)
+
+Con Tier 0 (ECM) y Tier 1 (Qt6) completos, arrancó el research de Tier 2
+contra fuente real (`CMakeLists.txt` de cada framework, bajados de
+`invent.kde.org/frameworks/<repo>`, rama `master` — la misma versión de
+dependencias que la release 6.29.0 real, confirmado que el listado completo
+de tarballs de esa release en `download.kde.org/stable/frameworks/6.29/`
+incluye los ~70 paquetes del tren, más `attica`/`breeze-icons` en la misma
+base). Todavía SIN escribir ningún script de Tier 2 -- esto es el mapa,
+antes de tocar código.
+
+**Tier 2a — sólo necesitan Qt6 (ya completo) + librerías de sistema ya
+compiladas en este proyecto, ningún otro KF6:**
+- `kcodecs`, `kitemviews`, `kitemmodels` — sólo Qt.
+- `kcoreaddons` — Qt Core + `LibMount` REQUIRED (ya compilado, util-linux de
+  Fase 2) + `Inotify` opcional (headers del kernel, ya disponibles).
+- `kconfig` — Qt Xml/Gui/DBus (todos ya en el sysroot).
+- `kwidgetsaddons` — Qt Widgets.
+- `ki18n` — Qt Core + `LibIntl` (parte de glibc, ya disponible) +
+  `IsoCodes` (paquete de datos XML/JSON, **nuevo, sin compilar todavía**).
+- `kdbusaddons` — Qt DBus + Gui(private).
+- `karchive` — Qt Core + ZLIB/BZip2/LibLZMA/OpenSSL, **los 4 ya
+  compilados** en este proyecto (Fase 2/Fase 4).
+- `kglobalaccel` — Qt DBus/Gui/Widgets, ningún KF6.
+- `kguiaddons`, `kidletime`, `kwindowsystem` — Qt Gui/Wayland +
+  **`PlasmaWaylandProtocols` (nuevo, ver más abajo)**, condicionado a un
+  build option real por framework (`WITH_X11`/`WITH_WAYLAND` en
+  kguiaddons, confirmado leyendo el `if()` real del CMakeLists — con la
+  decisión ya tomada de Wayland puro, va `-DWITH_X11=OFF -DWITH_WAYLAND=ON`
+  en los tres).
+
+**Prerequisito nuevo encontrado: `PlasmaWaylandProtocols`.** No es parte
+del tren de KDE Frameworks (se versiona aparte — kwin real pedía `1.21.0`,
+no un número `6.x`) ni tiene tarball en `download.kde.org/stable/plasma/`
+pese a aparecer listado ahí (probado, 404 real). Fuente real confirmada:
+mirror de GitHub `KDE/plasma-wayland-protocols`, tag `v1.21.0` (coincide
+exacto con lo que pide kwin) — mismo patrón `archive/refs/tags` que ya usa
+este proyecto para otros paquetes sin tarball de "make dist". Es,
+igual que `wayland-protocols` (Fase 6 Parte 1), sólo protocolos XML +
+build con ECM/CMake — debería ser liviano.
+
+**Tier 2b — dependen de frameworks de Tier 2a:**
+- `kcolorscheme` — KF6Config, KF6GuiAddons, KF6I18n.
+- `kauth` — KF6CoreAddons.
+- `kcrash` — KF6CoreAddons.
+- `kcompletion` — KF6Codecs, KF6Config, KF6WidgetsAddons.
+- `kconfigwidgets` — KF6CoreAddons, KF6Codecs, KF6Config, KF6GuiAddons,
+  KF6I18n, KF6WidgetsAddons, KF6ColorScheme.
+- `kservice` — KF6Config, KF6CoreAddons, KF6I18n, (opcional KF6DocTools).
+- `kpackage` — KF6Archive, KF6I18n, KF6CoreAddons, (opcional KF6DocTools).
+- `knotifications` — KF6Config REQUIRED, opcional Canberra (ya compilado
+  en Tier 4 de kwin... en realidad Canberra es Tier 4 de plasma-workspace,
+  **todavía sin compilar** — ver mapa original al principio de este
+  archivo).
+- `kdoctools` — Qt Core + KF6Archive + KF6I18n (opcional) + `LibXslt`/
+  `LibXml2` (libxml2 ya compilado, Fase 6 Parte 3 prerequisito) +
+  `DocBookXML4`/`DocBookXSL` (**nuevos**, paquetes de datos XML, no
+  librerías de código).
+
+**Tier 2c — dependen de Tier 2b (más profundo):**
+- `kiconthemes` — KF6Archive, KF6I18n, KF6WidgetsAddons, KF6ColorScheme,
+  **KF6BreezeIcons** (nuevo — el tema de íconos Breeze en sí, versionado en
+  el mismo tren 6.29.0, es un prerequisito real de código, no sólo un tema
+  visual opcional).
+- `kdeclarative` — KF6I18n, KF6Config, KF6GuiAddons, (opcional
+  KF6GlobalAccel, KF6WidgetsAddons).
+- `krunner` — KF6Config, KF6CoreAddons, KF6I18n, (opcional
+  KF6ItemModels), KF6WindowSystem.
+- `kxmlgui` — KF6CoreAddons, KF6ItemViews, KF6Config, KF6ConfigWidgets,
+  KF6GuiAddons, KF6I18n, KF6IconThemes, KF6WidgetsAddons, (opcional
+  KF6GlobalAccel).
+- `ksvg` (el componente "Svg" que pide kwin, distinto de `Qt6::Svg`) —
+  Qt Quick/Gui/Qml/Svg/QuickControls2 + KF6 (lista cortada en el grep, hay
+  que revisar completa cuando se llegue a este paso).
+
+**Tier 2d — las piezas pesadas, todavía no mapeadas en profundidad:**
+- `kcmutils` — depende de **KF6KIO** (el framework más grande de todos,
+  todavía sin research propio) + KF6ItemViews, KF6ConfigWidgets,
+  KF6CoreAddons, KF6GuiAddons, KF6I18n, KF6XmlGui, KF6WidgetsAddons.
+- `knewstuff` — KF6Archive, KF6Config, KF6CoreAddons, KF6I18n, KF6Package,
+  KF6WidgetsAddons, **KF6Attica REQUIRED** (nuevo, cliente de servicios web
+  de KDE Store — paquete separado, mismo tren 6.29.0), opcional
+  KF6Kirigami/KF6Syndication.
+
+**Sin empezar research todavía:** KF6KIO en profundidad (bloquea
+`kcmutils`, que kwin pide `REQUIRED`), Kirigami/KirigamiAddons (Tier 3 del
+mapa original), y todo lo del "tren de Plasma"/Tier 4 del mapa original
+(QCoro6, ICU, libcanberra, libei, lcms2, hwdata, etc.).
+
+**Tier 2a — ✅ COMPLETO y verificado (2026-09-04).** Los 13 módulos
+(`isocodes`, `plasma-wayland-protocols`, `kcodecs`, `kitemviews`,
+`kitemmodels`, `kcoreaddons`, `kconfig`, `kwidgetsaddons`, `ki18n`,
+`kdbusaddons`, `karchive`, `kglobalaccel`, `kguiaddons`, `kidletime`,
+`kwindowsystem`) más dos prerequisitos nuevos descubiertos en la corrida
+real (`zstd`, `liblzma`) — todos compilados, instalados y verificados en
+el sysroot. Errores reales encontrados y corregidos, todos documentados en
+el código con su causa raíz:
+
+1. **`BUILD_PYTHON_BINDINGS`** (Shiboken6/PySide6) prendido por defecto en
+   varios frameworks, pide `Python3 Development` que el Dockerfile no
+   tiene instalado (`python3-dev`). Apagado en el helper compartido
+   `_kf6_cmake_build()` para los 13 módulos de una vez.
+2. **`WITH_X11`** (ON por defecto en Linux) rompía `kdbusaddons`
+   compilando `kdbusservice.cpp` (`private/qtx11extras_p.h` no existe
+   porque Qt6 se compiló sin X11 a propósito). Resultó ser una opción
+   general de KF6, no sólo de los 3 frameworks con soporte Wayland
+   explícito — apagada también en el helper compartido.
+3. **`libzstd` y `liblzma`**, dos prerequisitos reales de `karchive` que el
+   research original no había detectado (usan `pkg_check_modules()` y
+   `find_package()` sin `REQUIRED` respectivamente, pero ambos se vuelven
+   obligatorios de verdad vía `option(WITH_LIBZSTD/WITH_LIBLZMA ... ON)` +
+   `ecm_feature_summary()` al final). Se agregaron `step_zstd()`
+   (facebook/zstd v1.5.7) y `step_liblzma()` (tukaani-project/xz v5.8.3)
+   nuevos — corrigiendo además un comentario anterior de este archivo que
+   decía (mal) que los 4 ya estaban compilados.
+4. **`kwindowsystem` usa `KWINDOWSYSTEM_X11`/`KWINDOWSYSTEM_WAYLAND`, no
+   `WITH_X11`/`WITH_WAYLAND`** como kguiaddons/kidletime — exactamente el
+   riesgo que ya se había anotado por adelantado en el comentario del
+   código antes de correrlo. Corregido con el nombre real de opción de
+   ese framework en particular.
+5. Dos falsos negativos de verify (mismo patrón .pc en `share/pkgconfig`
+   vs `lib/pkgconfig` ya visto varias veces en este proyecto): `iso-codes`
+   y su propio guard `require_isocodes()`.
+
+**Tier 2b — ✅ COMPLETO y verificado (2026-09-04)**, excepto `kdoctools`
+(diferido a propósito, ver más abajo). Los 9 módulos (`kcolorscheme`,
+`kauth`, `kcrash`, `kcompletion`, `kconfigwidgets`, `kservice`, `kpackage`,
+`libcanberra` + prerequisitos, `knotifications`) compilados, instalados y
+verificados. Cadena de prerequisitos reales encontrados en la corrida,
+ninguno estaba en el mapa original:
+
+- **`Canberra` resultó REQUIRED de verdad** en Linux normal (el mapa
+  original lo había anotado como opcional, cierto sólo para
+  plasma-workspace) — confirmado leyendo el `if()` real de
+  `knotifications`. Cadena completa de prerequisitos nuevos, cada uno
+  encontrado en la corrida real del anterior, ninguno anticipable sin
+  correr:
+  1. **`libltdl`** (de GNU libtool) — libcanberra carga sus backends de
+     audio como módulos dinámicos. Truco real: sólo hace falta compilar el
+     subdirectorio `libltdl/` del tarball de libtool (tiene su propio
+     `configure` standalone), no libtool completo — y ese subdirectorio
+     necesita el flag `--enable-ltdl-install` (OFF por default) para que
+     `make install` instale algo — sin el flag, compila una "convenience
+     library" interna (`libltdlc.la`) y no instala nada, sin ningún error
+     visible (primer intento real: `make install` corrió limpio pero no
+     dejó ni `libltdl.so` ni `ltdl.h` en el sysroot).
+  2. **`libogg` + `libvorbis`** — "### Vorbis (mandatory) ###" en el
+     `configure.ac` real de libcanberra (reproduce sonidos de tema
+     codificados en Ogg Vorbis). Xiph.Org los publica separados,
+     libvorbis depende de libogg.
+  - `libcanberra` en sí: `--enable-alsa` (ya compilado), sin pulse/
+    gstreamer/gtk. Primer script Autotools de este archivo (Tier 0-2 fue
+    CMake/Meson puro hasta acá) — se agregó `build_triplet()` (ya existía)
+    y el patrón `--host/--build` sin `CC=` explícito, igual que el resto
+    del proyecto.
+  - **Nota menor, no bloqueante:** el install de libcanberra dejó los
+    `.service` de systemd en `/lfs/lfs/usr/lib/systemd/system` (`/lfs`
+    duplicado) — mismo bug de fondo ya documentado para wireplumber en
+    Fase 6 Parte 1 (`systemduserunitdir` de systemd.pc con `/lfs` de más,
+    sumado a `DESTDIR=/lfs`). No rompe nada ahora (sysroot monolítico, sin
+    booteo real todavía); revisar junto con el de wireplumber cuando se
+    llegue a empaquetar de verdad.
+- Otro falso negativo de verify corregido antes de correr (no hizo falta
+  un segundo intento): `require_isocodes()` tenía la misma ruta mal que ya
+  se había corregido en `step_verify_isocodes()`.
+
+**`kdoctools` diferido a propósito** (no bloquea nada de lo que sigue —
+`kservice`/`kpackage` ya confirmaron que `KF6DocTools` es opcional en
+ambos): necesita `LibXslt`, `DocBookXML4` y `DocBookXSL`, tres
+dependencias nuevas sin investigar todavía. Se retoma si algo del árbol
+más adelante lo pide de verdad como `REQUIRED`.
+
+**Tier 2c — ✅ COMPLETO y verificado (2026-09-04).** Los 6 módulos
+(`kiconthemes`, `kdeclarative`, `krunner`, `kxmlgui`, `kirigami`, `ksvg`) +
+`breezeicons` (nativo y cruzado) — todos compilados, instalados y
+verificados. Hallazgo más importante de este tramo:
+
+- **`BreezeIcons` destapó un mecanismo de KF6 equivalente al `QT_HOST_PATH`
+  de Qt6, pero propio de KDE Frameworks: `KF6_HOST_TOOLING`.** El build
+  CRUZADO rompió invocando su propio `generate-symbolic-dark`
+  ("error while loading shared libraries: libQt6Core.so.6") -- mismo
+  problema de fondo de siempre (binario cruzado invocado en tiempo de
+  build), pero confirmado leyendo `tools/CMakeLists.txt` real que KF6 ya
+  tiene su convención propia para esto: `if (CMAKE_CROSSCOMPILING AND
+  KF6_HOST_TOOLING): find_program(... PATHS ${KF6_HOST_TOOLING} ...)`.
+  Se agregó `step_breezeicons_native()` (con `-DINSTALL_HOST_TOOLS=ON`,
+  la variable real que gatea el install de esas dos herramientas) +
+  `KF6_NATIVE_BUILD`/`KF6_NATIVE_INSTALL` (mismo patrón que
+  `QT6_NATIVE_*`) — el build cruzado apunta ahí con
+  `-DKF6_HOST_TOOLING="${KF6_NATIVE_INSTALL}/bin"`. A diferencia de Qt6,
+  el build nativo de BreezeIcons NO necesita nada especial (ni toolchain
+  file ni acotar targets a mano): como es 100% nativo de punta a punta, el
+  propio `generate-symbolic-dark` corre bien solo durante su propio build,
+  sin el problema de glibc cruzada. **Vale la pena tener este mecanismo
+  presente para el resto de Tier 2d/3** (Kirigami/KirigamiAddons, KIO,
+  etc. — cualquiera podría tener el mismo patrón).
+- **`ksvg` necesitaba `KF6KirigamiPlatform`**, no anticipado en el mapa
+  original. Se agregó `step_kirigami()` — Kirigami en sí resultó
+  sorprendentemente liviano de dependencias: CERO frameworks KF6, sólo Qt6
+  (ya completo), confirmado leyendo su `CMakeLists.txt` real. Compiló
+  limpio al primer intento.
+- Dos falsos negativos de verify corregidos (nombres de paquete/librería
+  reales distintos de lo asumido, sin volver a correr el build): BreezeIcons
+  (`KF6BreezeIcons`, no `BreezeIcons` a secas) y KDeclarative (no produce
+  ninguna librería principal propia — sólo plugins QML +
+  `libKF6CalendarEvents.so`, se verifica el paquete cmake en vez de una lib
+  inexistente).
+
+**Tier 2d (parte 1: desbloqueadores de KF6KIO) — ✅ COMPLETO y verificado
+(2026-09-04).** `KF6KIO` (el framework más grande de todo KF6) resultó
+necesitar 3 frameworks nuevos que no estaban en el mapa original de este
+documento — descubierto leyendo su `CMakeLists.txt` real en
+`invent.kde.org/frameworks/kio`:
+
+- **`KF6Solid`** (para `kio_trash`), **`KF6Bookmarks`** y
+  **`KF6JobWidgets`**. Los tres módulos compilaron **limpio al primer
+  intento**, sin ningún error real — primera vez en todo Fase 6 Parte 3
+  que un tramo entero no encuentra nada que arreglar.
+- Nombres de repo/tarball reales confirmados antes de escribir código
+  (evitando adivinar, después de que un primer intento con
+  `frameworks/bookmarks` y `frameworks/jobwidgets` diera 404 en
+  invent.kde.org): son **`kbookmarks`** y **`kjobwidgets`** (con el
+  prefijo "k", a diferencia de `solid`, que NO lo lleva).
+- `kbookmarks` y `kjobwidgets` sólo dependen de frameworks ya compilados
+  (`KF6Config`, `KF6CoreAddons`, `KF6WidgetsAddons`, `KF6Notifications`) —
+  nada nuevo.
+- `solid` necesitaba `FLEX`/`BISON` (ya en el Dockerfile desde Fase 0,
+  herramientas de host puras para generar el parser de `Predicate`, sin
+  el problema de binario-cruzado-en-build-time) y, en el bloque
+  `CMAKE_SYSTEM_NAME MATCHES Linux` de su `CMakeLists.txt`, `LibMount` y
+  `UDev` como `REQUIRED`. Se confirmó por adelantado (antes de correr el
+  build) que ambas ya existen en el sysroot — `libmount.so`+headers de
+  Fase 2/util-linux, `libudev.so`+headers de Fase 2/systemd — con un
+  `find` real dentro del contenedor, así que no hizo falta agregar ningún
+  paso nuevo de librería del sistema.
+- Se agregaron `step_kbookmarks()`/`step_kjobwidgets()`/`step_solid()` (y
+  sus `verify-*`) usando el helper compartido `_kf6_cmake_build()`, sin
+  flags extra — los tres siguen el patrón estándar del resto de Tier 2.
+
+**Tier 2d (parte 2: `KF6KIO`) — ✅ COMPLETO y verificado (2026-09-04).**
+El framework más grande de todo KF6 compiló **limpio al primer intento**,
+sin ningún error real — igual que sus 3 desbloqueadores. Confirma que el
+mapa de dependencias armado con research previo (contra el
+`CMakeLists.txt` real, sección "Tier 2 — mapa de dependencias real" más
+arriba) estaba completo: `KF6Config`, `KF6CoreAddons`, `KF6I18n`,
+`KF6Service`, `KF6Crash`, `KF6Solid`, `KF6WindowSystem`, `KF6Bookmarks`,
+`KF6ColorScheme`, `KF6Completion`, `KF6GuiAddons`, `KF6IconThemes`,
+`KF6ItemViews`, `KF6JobWidgets`, `KF6WidgetsAddons`, `KF6DBusAddons` — las
+16 dependencias KF6 ya estaban en el sysroot antes de empezar. `ACL`
+(sólo `RECOMMENDED`, no `REQUIRED`) se omitió sin agregar la librería, sin
+bloquear el build. `WITH_X11=OFF` y `LibMount` (ya presente desde Fase
+2/util-linux) tampoco dieron problema.
+
+**Tier 2d (parte 3: `KF6Attica` + `knewstuff`) — ✅ COMPLETO y verificado
+(2026-09-04).** Cierra Tier 2d y con él **todo KF6 (Tier 2 completo)**.
+
+- **`Attica`** resultó ser el framework más liviano de todo el proyecto:
+  sólo `ECM` + `Qt6 Core/Network`, cero dependencias KF6 propias
+  (confirmado contra su `CMakeLists.txt` real en
+  `invent.kde.org/frameworks/attica`). Compiló limpio al primer intento.
+  Librería real: `libKF6Attica.so`.
+- **`knewstuff`** necesita `KF6Archive`, `KF6Config`, `KF6CoreAddons`,
+  `KF6I18n`, `KF6Package`, `KF6WidgetsAddons`, `KF6Attica` (los 7
+  `REQUIRED`, todos ya en el sysroot) + `Qt6 Gui/Widgets/Xml/Qml/Quick/
+  QuickWidgets`. `KF6Kirigami` (`OPTIONAL`, para los componentes QML) se
+  detectó solo porque ya está compilado; `KF6Syndication` (`OPTIONAL`,
+  sólo para soporte OPDS) se omitió a propósito — no está en el mapa de
+  este proyecto y nada lo pide como `REQUIRED`. Compiló limpio al primer
+  intento. Librería principal real: `libKF6NewStuffCore.so` (confirmado
+  contra `src/core/CMakeLists.txt` real — el target se llama
+  `KF6NewStuffCore`, no `KF6KNewStuff` ni `KF6NewStuff` a secas; también
+  produce `libKF6NewStuffWidgets.so` y plugins QML).
+
+**Balance de todo Tier 2d:** los 6 módulos (`kbookmarks`, `kjobwidgets`,
+`solid`, `KIO`, `attica`, `knewstuff`) compilaron **limpio al primer
+intento, sin un solo error real** — el tramo más largo de Fase 6 Parte 3
+sin ningún hallazgo que documentar más allá de investigación de mapeo de
+dependencias. Confirma que el research previo (leer el `CMakeLists.txt`
+real de cada paquete ANTES de escribir código) sigue siendo la práctica
+correcta: cuando el mapa de dependencias está bien armado de antemano, el
+build cruzado no tiene sorpresas.
+
+**Tier 2 (KDE Frameworks 6) — ✅ COMPLETO en su totalidad (2026-09-04).**
+Los 4 tramos (2a/2b/2c/2d) + Tier 0 (ECM) + Tier 1 (Qt6) cubren todo lo
+necesario para Tier 3.
+
+## Tier 3 (tren de Plasma) — arranque real (2026-09-04)
+
+### Retrofit real sobre Tier 1 (Qt6) -- descubierto recién acá, ya "✅ COMPLETO"
+
+Al intentar `libplasma` por primera vez, `ecm_find_qmlmodule(Qt5Compat.GraphicalEffects REQUIRED)`
+falló con un warning real: `qmldir not found in /usr/lib/qml/... or
+/lfs/build/qt6-native-install/qml/.../qmldir`. Root cause confirmado
+leyendo `${LFS_SYSROOT}/usr/lib/cmake/Qt6/QtInstallPaths.cmake` real:
+**Qt6 (sin flags extra) instala sus propios módulos QML en `/usr/qml`**,
+mientras que **KDE/ECM los busca en `/usr/lib/qml`** (confirmado contra
+`KDEInstallDirs6.cmake` real: intenta preguntarle a Qt vía
+`ecm_query_qt(... QT_INSTALL_QML)`, que en un build CRUZADO termina
+consultando el `qtpaths` NATIVO por error de fondo, y cae al fallback
+real `LIBDIR/qml`). Mismo criterio que usan distros reales
+(Fedora/Arch fijan `INSTALL_QMLDIR` para que coincida con el de KDE) —
+se alineó Qt a la convención de KDE, no al revés:
+
+- Se agregó `-DINSTALL_QMLDIR=lib/qml` a `step_qtbase()` (cruzado) y se
+  **recompiló qtbase** (reescribe `QtInstallPaths.cmake` para todo el
+  árbol de Qt).
+- Se **recompilaron** `qtdeclarative`, `qtsvg`, `qt5compat` y `qtwayland`
+  (cruzados) para que su contenido QML se reinstale en la ruta corregida
+  -- confirmado con un find real: `Qt5Compat.GraphicalEffects` ahora
+  aparece en `/usr/lib/qml/Qt5Compat/GraphicalEffects/qmldir`.
+- Segundo bug real encontrado en la MISMA vuelta: el tool nuevo de Qt
+  6.11 `svgtoqml` (paquete `Qt6QuickTools`, necesario para que
+  `qtdeclarative` CRUZADO encuentre su host tool) sólo se agrega al build
+  si `TARGET Qt::Quick AND QT_FEATURE_quick_vectorimage` -- y esa feature
+  depende de `Qt::SvgPrivate` (confirmado contra los `CMakeLists.txt`
+  reales de `qtdeclarative`), pero **nunca existió un `qtsvg-native`** en
+  este proyecto (sólo el cruzado). Se agregó `step_qtsvg_native()` +
+  `step_verify_qtsvg_native()` + `require_qtsvg_native()` (Tier 1,
+  mismo patrón `QT6_NATIVE_INSTALL` de siempre) y se recompiló
+  `qtdeclarative-native` -- confirmado: `Qt6QuickTools` aparece recién
+  después. Se limpiaron los ~24MB huérfanos de `/usr/qml` tras el
+  retrofit (nada los busca ahí después del fix).
+- **Incidente de infraestructura aparte, resuelto en el medio:** el DNS
+  interno de la red de Podman se colgó a mitad de sesión (el contenedor
+  no resolvía ningún host, aunque la VM WSL2 por fuera sí) -- mismo tipo
+  de degradación que la crisis de disco anterior. Se resolvió con
+  `podman machine stop` + `podman machine start` (no toca los volúmenes
+  con nombre, sin pérdida de datos), confirmado con un DNS real desde
+  adentro del contenedor antes de seguir.
+
+### libxcb y su cadena — nuevo, agregado sólo para un bug real de libplasma
+
+`libplasma` v6.7.4 tiene `src/plasma/private/blureffectwatcher_p.h` con
+`#include <xcb/xcb.h>` **sin ningún guard de preprocesador**, pese a que
+el uso real del símbolo sí está guardeado (`#if HAVE_X11`, indefinido en
+este proyecto). Decisión tomada junto con el usuario: compilar un libxcb
+real y mínimo (nunca se linkea de verdad en runtime) en vez de parchear
+este include puntual -- ver más abajo por qué el patch SÍ terminó siendo
+necesario para el resto de casos similares. Cadena real de dependencias
+(xorg.freedesktop.org, accesible en vivo a diferencia de
+gitlab.freedesktop.org): `xorgproto` (headers puros, últimas versión
+2025.1) → `libXau` 1.0.12 + `libXdmcp` 1.1.5 (autenticación X, cada uno
+independiente) → `xcb-proto` 1.17.0 (specs XML + módulo python
+"xcbgen") → `libxcb` 1.17.0. Los 5 compilaron limpio, sólo 2 falsos
+negativos de verify corregidos (`xorgproto.pc`/`xcb-proto.pc` no
+existen como tales -- xorgproto no genera un .pc combinado, cada
+sub-protocolo mantiene el suyo; verify corregido a `xproto.pc`/
+`xcb-proto.pc` reales, en `/usr/share/pkgconfig`, no `/usr/lib/pkgconfig`).
+
+### libplasma — ✅ COMPLETO (2026-09-04), primer parche real de todo el proyecto
+
+Con libxcb resuelto, apareció un SEGUNDO bug del mismo patrón pero mucho
+más grande: `theme_p.cpp` incluye `<KX11Extras>` sin guard. A diferencia
+de xcb.h, la solución "agregar la librería real" acá era desproporcionada
+-- `KX11Extras` sólo existe si `KWindowSystem` se compila con
+`KWINDOWSYSTEM_X11=ON`, que exige Xlib real (`find_package(X11
+REQUIRED)`) + `xcb-util` + `xcb-util-keysyms` + `icccm` (confirmado
+contra el `CMakeLists.txt` real de kwindowsystem) -- meter Xlib de
+verdad en el sysroot choca de frente con el Pilar 5 ("Wayland puro").
+Decidido junto con el usuario: **parchear la fuente** en vez de eso.
+
+Investigando más, resultó ser un bug **sistemático** de esta tag exacta,
+no un caso aislado -- confirmado contra el código real, apareció en
+**5 archivos** con **13 usos** de `KX11Extras`/`KWindowInfo`, casi todos
+detrás de un chequeo de runtime (`KWindowSystem::isPlatformX11()`, que en
+Wayland puro siempre da falso) que no alcanza para que compile sin la
+librería real:
+
+- `src/plasma/private/theme_p.cpp` (4 reemplazos: el include + 3 usos,
+  incluido un CUARTO bug relacionado descubierto recién en el segundo
+  intento real: `BlurEffectWatcher` sólo implementa su método virtual
+  puro heredado -- `QAbstractNativeEventFilter::nativeEventFilter` --
+  adentro de un `#if HAVE_X11` en su propio header, dejándola abstracta
+  con `HAVE_X11=0`; `new BlurEffectWatcher()` en este archivo no estaba
+  guardeado -- "invalid new-expression of abstract class type" real).
+- `src/plasmaquick/plasmawindow.cpp` (3 reemplazos) y
+  `src/plasmaquick/appletpopup.cpp` (2 reemplazos) -- ninguno de los dos
+  incluía `config-plasma.h` todavía, hubo que agregarlo (mismo que ya usa
+  `dialog.cpp`, mismo target `PlasmaQuick`) para que `HAVE_X11` exista de
+  verdad -- si no, `-Werror=undef` (real, en los flags de compilación)
+  rompe el build igual.
+- `src/plasmaquick/dialog.cpp` (7 reemplazos -- el más grande, ya tenía
+  un `#if HAVE_X11` real en otra parte del mismo archivo para un caso
+  distinto, confirmando que es el mismo criterio que usa upstream).
+- `src/declarativeimports/core/windowthumbnail.cpp` (3 reemplazos --
+  necesitó `config-x11.h`, no `config-plasma.h`, el que CMake genera
+  realmente en ese mismo directorio).
+
+Cada reemplazo preserva el comportamiento de runtime REAL para
+`HAVE_X11=0` (confirmado leyendo cada call site antes de tocarlo -- varios
+`if (!isPlatformX11() || ...)` ya evaluaban siempre verdadero en Wayland
+por el propio short-circuit, y varios `else` ya eran el camino Wayland
+real vía `PlasmaShellWaylandIntegration`/ícono de fallback). Implementado
+como `_patch_libplasma()` en `scripts/build-kde.sh`: reemplazos de texto
+exacto vía Python (no un `.patch` con números de línea, para no depender
+de que el offset coincida byte a byte con la tag real) -- falla fuerte y
+explícito si algún ancla no aparece o no es única. Se agregó un hook
+genérico a `_plasma_cmake_build()` (busca una función `_patch_<tarname>`
+y la corre una sola vez, marcador `.patched-<tarname>`) para que futuros
+parches de Tier 3 (kwin/plasma-workspace son candidatos reales al mismo
+patrón) no necesiten duplicar la lógica.
+
+Confirmado con un build real limpio (sin errores) tras las 4 rondas de
+parche + rebuild, y `verify-libplasma` real: `libPlasma.so`. De paso,
+`PlasmaQuick` **NO es un paquete Tier 3 aparte** como decía el mapa
+original -- vive en el mismo tarball/CMake project que libplasma
+(`src/plasmaquick/`), se compiló y se instaló junto (`libPlasmaQuick.so`
+confirmado en el mismo log de install) -- corrección al mapa de
+dependencias.
+
+### KWayland, layer-shell-qt, KirigamiAddons -- ✅ COMPLETOS (2026-09-16), sin errores reales
+
+Los tres compilaron limpio al primer intento tras el research previo.
+
+- **KWayland** (la de Plasma, namespace `Plasma::`, distinta de
+  `Qt6WaylandClient` de Tier 1 y de `KF6WindowSystem`): destapó un mismatch
+  real de versión -- pide `PlasmaWaylandProtocols >= 1.22.0`, y este
+  proyecto tenía pinneado 1.21.0 (el mínimo que necesitaba kwin en el
+  research original). Se subió el pin del proyecto entero a **1.22.0**
+  (confirmado tag real `v1.22.0`, 10-sep-2026, en
+  `github.com/KDE/plasma-wayland-protocols/tags` -- sigue satisfaciendo a
+  kwin, que sólo pide `>= 1.21.0`).
+  - **Bug real de infraestructura encontrado en el mismo paso:** al subir
+    la versión, `step_plasma_wayland_protocols()` tiró
+    `CMake Error: The source directory ".../plasma-wayland-protocols-1.22.0"
+    does not exist` pese a que el log decía "ya extraído". Causa raíz: el
+    marcador de `extract_once()` para ese paso (y para los helpers
+    compartidos `_kf6_cmake_build()`/`_plasma_cmake_build()`) usaba
+    `.extracted-<tarname>` **sin la versión** -- al haber extraído
+    1.21.0 antes, ese marcador ya existía, y `extract_once()` daba por
+    hecho que 1.22.0 también estaba extraído sin haberlo estado nunca.
+    **Fix aplicado en los 3 lugares** (el paso puntual + los 2 helpers
+    compartidos): el marcador ahora incluye la versión
+    (`.extracted-<tarname>-<versión>`), previniendo el mismo bug para
+    cualquier futuro bump de versión de cualquier paquete ya compilado.
+  - Target real: `KWaylandClient` (namespace `Plasma::`), NO "KWayland" a
+    secas -- confirmado contra `src/client/CMakeLists.txt` real.
+- **layer-shell-qt**: integra el protocolo `wlr-layer-shell` con Qt6.
+  Sin sorpresas -- todas las dependencias (Wayland Client+Server >= 1.3,
+  WaylandProtocols, xkbcommon) ya estaban. Target real:
+  `LayerShellQtInterface` (no "layer-shell", que es sólo el plugin QPA
+  interno).
+- **KirigamiAddons**: versionado en un tercer ciclo de release, separado
+  tanto de KDE Frameworks como del tren de Plasma (confirmado listando
+  `download.kde.org/stable/kirigami-addons/`, última real 1.13.1,
+  2026-07-20; repo real bajo `invent.kde.org/libraries/kirigami-addons`,
+  NO `frameworks/`, donde 404 primero). Se agregó `step_kirigami_addons()`
+  como función propia (no encaja en `_kf6_cmake_build()` ni
+  `_plasma_cmake_build()`, cada uno atado a su propia variable de
+  versión). Es mayormente QML puro (formcard, delegates, statefulapp),
+  sin una única lib monolítica -- se verifica contra
+  `KF6KirigamiAddonsConfig.cmake`.
+
+### libkscreen (KF6Screen) -- ✅ COMPLETO (2026-09-16), tercer y cuarto+quinto hallazgo real del mismo bug de X11
+
+Sin opciones de X11/XRandR declaradas en su `CMakeLists.txt` (confirmado
+-- ni siquiera existe un `WITH_X11` ahí), pero apareció el mismo patrón de
+bug sistemático de esta release de KDE **tres veces más**, en formas cada
+vez más distintas -- confirma que vale la pena tener el patrón siempre
+presente de acá en adelante:
+
+1. **`src/libdpms/dpms.cpp`**: `#include <QtGui/private/qtx11extras_p.h>`
+   sin guard (header PRIVADO de Qt6Gui, sólo existe con
+   `-DFEATURE_xcb=ON` -- este proyecto compiló Qt con `OFF` a propósito).
+   El uso real (`QX11Info::isPlatformX11()`) sí estaba detrás de un
+   runtime-check real, con un `else if` de Wayland al lado. Se sacó el
+   include + el branch X11 completo, dejando sólo el camino Wayland real
+   (mismo criterio que ya se usó en libplasma: preservar el
+   comportamiento real, no inventar uno nuevo).
+2. **`src/libdpms/xcbdpmshelper.cpp`**: a diferencia del anterior, este
+   archivo es **100% implementación X11/XCB**, sin nada portable adentro
+   -- no tiene sentido guardearlo línea por línea. Se sacó directo del
+   `target_sources()` de `src/libdpms/CMakeLists.txt` (junto con
+   `XCB::XCB XCB::DPMS XCB::RANDR` de su `target_link_libraries()`, que
+   ya no hacían falta). Importante: **no hizo falta agregar ninguna
+   librería nueva** -- `libxcb-dpms`/`libxcb-randr` ya estaban compilados
+   desde el libxcb mínimo agregado para libplasma; el problema era
+   puramente el header privado de Qt, no una librería faltante.
+3. **`src/backendmanager.cpp`**: mismo patrón que el punto 1 (include sin
+   guard + runtime-check real con rama Wayland al lado) pero en el
+   selector de qué backend de verdad usar (XRandR vs KWayland). Mismo
+   fix: sacar el include + la rama X11 completa.
+4. **`backends/xrandr/` (target `KSC_XRandR`)**: el hallazgo más
+   interesante de los cuatro -- este backend SÍ está bien gateado por
+   upstream (`if(${XCB_RANDR_FOUND})`, real, en `backends/CMakeLists.txt`)
+   pero el gate se disparó igual **porque este proyecto SÍ tiene
+   libxcb-randr compilado** (efecto colateral real del libxcb mínimo
+   agregado para libplasma: habilita sin querer código KDE que asume que
+   "tener libxcb-randr" implica "tener el resto de la integración X11 de
+   Qt", cosa que acá nunca es cierta). Como el backend XRandR nunca se
+   iba a poder seleccionar en runtime de todos modos (ya se sacó del
+   punto 3), se sacó el `add_subdirectory(xrandr)` entero del build, sin
+   importar `XCB_RANDR_FOUND`.
+
+Los 4 parches quedan en `_patch_libkscreen()` (mismo mecanismo genérico de
+`_plasma_cmake_build()` que ya se usó para libplasma). Compiló limpio
+después. Target real: `KF6Screen` (namespace `Plasma::Screen`, tarball
+`libkscreen`).
+
+**Lección reforzada:** el libxcb mínimo agregado para satisfacer un solo
+`#include <xcb/xcb.h>` en libplasma tiene un efecto colateral real en
+cualquier paquete downstream que haga su propio `find_package(XCB
+COMPONENTS ...)` -- activa código X11 opcional que de otra forma hubiera
+quedado apagado solo. Vale la pena revisar esto de entrada en kwin (que
+sí tiene muchísimas más rutas X11 condicionales) en vez de descubrirlo
+recién al compilar.
+
+### KDecoration3, KCMUtils, Aurorae -- ✅ COMPLETOS (2026-09-16)
+
+- **KDecoration3** (`kdecoration`, tarball sin el "3"): REQUIRED real por
+  kwin (`find_package(KDecoration3 ... REQUIRED)`, confirmado). Muy
+  liviano -- sólo ECM + Qt6 Core/Gui/Test + KF6I18n, todo ya en el
+  sysroot. Compiló limpio al primer intento. Target real: `kdecorations3`
+  (namespace `KDecoration3::`, `EXPORT_NAME KDecoration`).
+- **KCMUtils**: dependencia nueva descubierta recién al investigar Aurorae
+  -- NO estaba en el mapa original de Tier 2 (KDE Frameworks). Es del
+  tren de KDE Frameworks (KDE_VERSION 6.29.0), no de Plasma, así que usa
+  `_kf6_cmake_build()` como el resto de Tier 2, aunque se agregó bien
+  entrado Tier 3. Compiló limpio, produce `KF6KCMUtilsCore`,
+  `KF6KCMUtils` y `KF6KCMUtilsQuick`.
+- **Aurorae**: motor de temas de decoración de ventanas "descargables de
+  internet" para kwin (RUNTIME opcional, no REQUIRED, pero entra por
+  "todo desde el principio"). Compiló limpio -- todas sus dependencias
+  (KDecoration3, KCMUtils, KF6 ColorScheme/Config/CoreAddons/I18n/
+  NewStuff/Package/Svg) ya estaban en el sysroot para cuando le tocó el
+  turno. Produce PLUGINS de KDecoration3, no una librería con nombre
+  estable -- verify corregido para chequear la ruta real confirmada tras
+  el install (`/usr/lib/plugins/org.kde.kdecoration3/org.kde.kwin.aurorae.so`),
+  no una búsqueda genérica.
+
+### Breeze -- ✅ COMPLETO (2026-09-16), destapó DOS herramientas cruzadas rotas que nunca se habían invocado antes
+
+Breeze (`breeze`, el tema de decoración/estilo/cursor **por defecto** de
+kwin -- DISTINTO de `breeze-icons`, ya compilado en Tier 2c) resultó ser
+el primer paquete de todo el proyecto en ejercitar dos herramientas de
+KF6 que hasta ahora nunca se habían invocado de verdad en ningún build
+anterior, pese a llevar semanas compiladas:
+
+- **Bloqueante encontrado ANTES de correr el build** (no en una vuelta
+  fallida): este proyecto compila Qt5 Y Qt6 por default
+  (`BUILD_QT5=ON`), y este proyecto no tiene Qt5 en absoluto. Se agregó
+  `-DBUILD_QT5=OFF` explícito a `step_breeze()`.
+- **`kcmdesktopfilegenerator` (de KCMUtils) roto en el contenedor** --
+  primer uso real de esta herramienta desde que se compiló KCMUtils hace
+  unas horas (Aurorae no llegó a necesitarla). Mismo problema de fondo de
+  siempre: el binario CRUZADO no corre en el contenedor
+  (`libQt6Core.so.6: cannot open shared object file`). A diferencia de
+  BreezeIcons, KCMUtils no tiene ningún mecanismo `KF6_HOST_TOOLING`
+  propio (confirmado contra su `CMakeLists.txt` real) -- pero SÍ tiene
+  una opción real `TOOLS_ONLY` (`if (TOOLS_ONLY): find_package(Qt6
+  REQUIRED Core); add_subdirectory(tools); return()`), perfecta para un
+  build nativo mínimo. Se agregó `step_kcmutils_native()`
+  (`-DTOOLS_ONLY=ON`, sólo pide Qt6::Core) y se modificó `step_kcmutils()`
+  para pisar el binario roto del sysroot con el nativo vía `cp -f`
+  (mismo patrón que `llvm-config`/`patchelf` en Fase 6 Parte 2, sólo que
+  acá alcanza con copiar, sin tocar RPATH). **Sorpresa real de ruta**:
+  GNUInstallDirs detecta multiarch en el build NATIVO (contenedor Debian)
+  e inserta `x86_64-linux-gnu` en el libdir
+  (`.../lib/x86_64-linux-gnu/libexec/kf6/...`) -- la ruta CRUZADA no lo
+  hace (`.../lib/libexec/kf6/...`, sin el segmento de triplete). Las dos
+  rutas quedaron documentadas explícitas en el script, no asumidas.
+- **`kconfig_compiler_kf6` (de KConfig, Tier 2a, compilado hace semanas)
+  también roto en el contenedor** -- Breeze es el PRIMER paquete de todo
+  el proyecto que realmente invoca `kconfig_add_kcfg_files()` (compila
+  `.kcfg` a C++) en su build; ningún consumidor de KF6 anterior había
+  ejercitado esto de verdad, así que el bug quedó latente sin
+  manifestarse durante semanas. Confirmado con `ldd` real: ni
+  `libQt6Xml.so.6` ni `libQt6Core.so.6` resolvían, más un choque de
+  versión de `GLIBCXX` contra el `libstdc++` del contenedor. KConfig
+  tampoco tiene `TOOLS_ONLY` ni `KF6_HOST_TOOLING` propio -- se agregó
+  `step_kconfig_native()` con un build mínimo real
+  (`-DKCONFIG_USE_GUI=OFF -DKCONFIG_USE_QML=OFF -DUSE_DBUS=OFF`, sólo
+  pide Qt6 Core+Xml, ambos ya nativos) y el mismo `cp -f` en
+  `step_kconfig()`. Confirmado con `ldd` real después del fix: ahora sí
+  resuelve contra las libs nativas.
+
+Tras los dos fixes, Breeze compiló limpio. Verify corregido contra la
+ruta real del plugin (`org.kde.breeze.so`, no "breezedecoration.so" como
+se había asumido -- mismo esquema de nombres que `org.kde.kwin.aurorae.so`
+de Aurorae).
+
+**Lección para lo que falta (kwin, plasma-workspace):** cualquier
+framework de KF6 que genere una herramienta de build propia (buscar
+`add_executable()` bajo un directorio `tools/`) es sospechoso de tener
+este mismo problema latente, **incluso si el framework en sí ya está
+compilado y verificado hace tiempo** -- el bug sólo se manifiesta la
+PRIMERA VEZ que algún consumiente real invoca esa herramienta específica
+en su propio build, no al compilar el framework que la provee. No alcanza
+con que `verify-<framework>` haya dado OK.
+
+### KSysGuard (`libksysguard`) -- ✅ COMPLETO (2026-09-16), cierra Tier 3
+
+Dependencias reales confirmadas contra su `CMakeLists.txt`
+(invent.kde.org/plasma/libksysguard): ECM; Qt6 DBus/Network/Widgets/Qml/
+Quick; KF6 CoreAddons/Config/I18n/Auth/Service/Package/NewStuff/Solid;
+ZLIB/Libdrm/UDev/Libcap (ya en el sysroot); **dos prerequisitos nuevos
+REQUIRED, ninguno en el mapa original**:
+
+- **libnl** (netlink, "para leer sockets vía sock_diag") -- Autotools
+  estándar, sin sorpresas, versión real 3.12.0
+  (github.com/thom311/libnl/releases, tag `libnl3_12_0`).
+- **lm-sensors / libsensors** ("para sensores de hardware") -- el primer
+  paquete de todo el proyecto con un **Makefile plano propio** (ni
+  autotools ni CMake ni Meson) -- se cross-compila pisando `CC=`/`AR=`
+  por línea de comandos en vez de `--host=`. Versión real 3.6.2 (última
+  tag real, github.com/lm-sensors/lm-sensors/tags, "V3-6-2",
+  13-ene-2024 -- el proyecto no tuvo release nueva desde entonces, no es
+  un pin viejo a propósito). **Bug real encontrado:** el archive de
+  GitHub para el tag "V3-6-2" extrae a `lm-sensors-3-6-2/`, NO
+  `lm-sensors-V3-6-2/` como se asumió al principio -- **GitHub SÍ pisa
+  la "V" mayúscula del tag**, no sólo la "v" minúscula (el patrón
+  documentado hasta ahora en este proyecto, ej. `plasma-wayland-protocols`,
+  sólo había confirmado el caso minúscula). Vale la pena tener esto
+  presente para cualquier futuro paquete con tag en mayúscula.
+
+`libpcap` (RECOMMENDED, no REQUIRED, sólo para medir uso de red por
+aplicación) se dejó afuera a propósito -- mismo criterio que VA-API/NVK/
+glvnd en Mesa (Fase 6 Parte 2): no se agrega scope opcional sin que algo
+lo pida como REQUIRED.
+
+Compiló limpio al primer intento (con libnl/lm-sensors ya resueltos). No
+produce una única `libKSysGuard.so` (el mapa original asumía mal) sino
+varias librerías separadas -- `libKSysGuardFormatter.so`,
+`libprocesscore.so`, `libKSysGuardSensors.so`, `libKSysGuardSensorFaces.so`,
+`libKSysGuardSystemStats.so` -- verify corregido para chequear las 3 más
+centrales contra el install real.
+
+## Tier 3 (tren de Plasma) -- ✅ COMPLETO en su totalidad (2026-09-16)
+
+Cierra Tier 3 completo: `PlasmaActivities`/`PlasmaActivitiesStats`,
+`libplasma` (con `PlasmaQuick` incluido), `KWayland`, `layer-shell-qt`,
+`KirigamiAddons`, `libkscreen`, `KDecoration3`, `KCMUtils`, `Aurorae`,
+`Breeze`, `KSysGuard` -- todos compilados y verificados. `Union` queda
+deliberadamente pospuesto: ningún consumidor real (ni kwin, ni ningún
+paquete de Tier 3) lo pide como `REQUIRED` -- no se agrega
+especulativamente, se retoma si algo lo exige de verdad más adelante.
+
+**Próximo paso real, ya investigado contra el `CMakeLists.txt` real de
+kwin** (`invent.kde.org/plasma/kwin`, confirmado en vivo, incluye la
+lista completa de `find_package()` con REQUIRED/opcional marcado): con
+`KWIN_BUILD_X11=OFF` (decisión ya tomada, saca de la ecuación XCB/X11
+real completos), los prerequisitos REQUIRED nuevos que faltan son:
+
+- **lcms2** (Little CMS 2, gestión de color) -- confirmado que NO está en
+  el sysroot todavía.
+- **libdisplay-info** (`>= 0.2.0`, parseo de EDID de monitores) --
+  tampoco está.
+- **KScreenLocker** -- REQUIRED si `KWIN_BUILD_SCREENLOCKER=ON` (default
+  ON) -- paquete completo de Plasma, sin investigar todavía.
+- **KGlobalAccelD** -- REQUIRED si `KWIN_BUILD_GLOBALSHORTCUTS=ON`
+  (default ON) -- sin confirmar todavía si es parte de `kglobalaccel`
+  (ya compilado) o un paquete/daemon aparte.
+- **epoxy** (`libepoxy`, dispatch de funciones GL) -- confirmado que NO
+  está en el sysroot (Mesa no lo provee, es un proyecto separado de
+  Tomas Frydrych/Adam Jackson).
+
+Todo lo demás que pide kwin (Qt6, KF6 Auth/ColorScheme/Config/
+CoreAddons/Crash/DBusAddons/GlobalAccel/GuiAddons/I18n/IdleTime/Package/
+Service/Svg/WidgetsAddons/WindowSystem + Declarative/KCMUtils/NewStuff/
+XmlGui/Runner/Notifications, KWayland, KDecoration3, KNightTime¹,
+Wayland/WaylandProtocols/PlasmaWaylandProtocols -- con versiones mínimas
+que EXACTAMENTE coinciden con lo que ya tenemos instalado (1.26.0/1.49/
+1.22.0, confirmado línea por línea), Canberra, Libinput, UDev, Libdrm,
+gbm, EGL, Vulkan, PipeWire, libevdev) ya está compilado desde fases
+anteriores. Breeze/Aurorae/PlasmaActivities/Kirigami/libplasma son
+RUNTIME opcionales, ya cubiertos también.
+
+¹ `KNightTime` (día/noche automático) todavía no está investigado ni
+compilado -- queda para cuando se llegue a esa parte de la lista.
+
+## Prerequisitos de kwin (Tier 4) -- avance real (2026-09-16)
+
+De los 5 prerequisitos REQUIRED identificados arriba, se resolvieron
+`lcms2`, `libdisplay-info` (vía `hwdata`), `libepoxy` y `KGlobalAccelD`;
+`KScreenLocker` quedó como el último, en compilación al momento de
+escribir esto.
+
+### libepoxy -- ✅ COMPLETO, dos bugs reales de fetch/opciones Meson
+
+**Bug 1 -- URL de descarga inexistente.** Se asumió el patrón habitual
+de release assets de GitHub
+(`.../releases/download/1.5.10/libepoxy-1.5.10.tar.gz`) pero ese asset
+NO existe -- libepoxy no publica tarballs de release, sólo tags de git.
+Confirmado con el Browser tool (WebFetch no puede renderizar el listado
+de assets de GitHub, que es JS). Fix: usar el archive automático de
+GitHub para el tag (`archive/refs/tags/1.5.10.tar.gz`, que sí existe
+siempre para cualquier tag).
+
+**Bug 2 -- tipos de opción Meson mezclados dentro del mismo proyecto.**
+Primer intento: `-Dx11=false -Dglx=false` → error de Meson: `"glx"` es
+`type: 'combo'` con choices `auto`/`yes`/`no`, no boolean. Segundo
+intento (corrigiendo por analogía): `-Dx11=no -Dglx=no` → error inverso:
+`"x11"` SÍ es `type: 'boolean'`. Causa raíz confirmada leyendo el
+`meson_options.txt` real del tarball extraído: `x11` es `boolean`
+mientras que `glx`/`egl` son `combo` -- no hay un patrón uniforme, hay
+que mirar cada opción. Flags finales que compilaron limpio:
+`-Dx11=false -Dglx=no -Degl=yes`.
+
+**Lección:** nunca asumir el tipo de una opción Meson por su nombre o
+por analogía con una opción vecina del mismo proyecto -- confirmar
+`meson_options.txt` real antes de pasar flags.
+
+### lcms2 -- ✅ COMPLETO, sin sorpresas
+
+Autotools estándar (`./configure --host=${LFS_TGT} --prefix=/usr` +
+`make DESTDIR="${LFS_SYSROOT}" install`). Tag real de release:
+`lcms2.19.1` (sin guión antes de la versión, confirmado contra
+`github.com/mm2/Little-CMS/releases`). Verifica `liblcms2.so`.
+
+### hwdata + libdisplay-info -- ✅ COMPLETO, primer bug real de
+dependencias Meson `native: true` en un build cruzado
+
+**Síntoma:** `libdisplay-info` fallaba con
+`File /usr/share/hwdata/pnp.ids does not exist.` incluso después de
+agregar `hwdata` al sysroot y confirmar que el archivo SÍ estaba en
+`${LFS_SYSROOT}/usr/share/hwdata/pnp.ids`.
+
+**Causa raíz** (confirmada leyendo el `meson.build` real de
+libdisplay-info extraído dentro del contenedor -- `gitlab.freedesktop.org`
+está bloqueado para WebFetch/Browser, pero el tarball ya descargado y
+extraído sí es legible): la dependencia está declarada como
+`dependency('hwdata', required: false, native: true)`. El flag
+`native: true` le dice a Meson que resuelva esa dependencia contra la
+máquina de BUILD (el contenedor), no contra el sysroot cruzado --
+porque `pnp.ids` sólo se usa en tiempo de build, por un script Python
+generador de código (`gen-search-table.py`) que arma una tabla C
+embebida; nunca se linkea ni se usa en runtime. Por eso instalarlo en
+el sysroot nunca alcanzaba.
+
+**Intento de fix rechazado antes de implementar:** instalar hwdata
+directo en `/usr/share/hwdata` del contenedor (sin `DESTDIR`). Se
+descartó de inmediato porque los contenedores de
+`podman-compose run --rm` son efímeros -- cualquier escritura al
+filesystem propio del contenedor se pierde al salir, rompiendo la
+reproducibilidad entre corridas separadas del script.
+
+**Fix real aplicado:** `step_hwdata()` ahora hace DOS instalaciones:
+la de siempre al sysroot (`DESTDIR="${LFS_SYSROOT}"`, para cualquier
+consumidor runtime futuro) más una segunda pasada nativa
+(`./configure --prefix="${HWDATA_NATIVE_INSTALL}"`, sin `DESTDIR`) que
+instala en el volumen persistente `${LFS_BUILD}/hwdata-native-install`
+-- mismo patrón que `QT6_NATIVE_INSTALL`/`KF6_NATIVE_INSTALL`, nunca en
+el filesystem efímero del contenedor.
+
+**Intento de fix #2, también fallido:** pasar
+`PKG_CONFIG_PATH="${HWDATA_NATIVE_INSTALL}/share/pkgconfig"` como
+prefijo de entorno inline en el propio comando `meson setup`. Volvió a
+fallar con el mismo error exacto. Se confirmó vía el `meson-log.txt`
+real que Meson invoca `pkg-config --modversion hwdata` SIN heredar ese
+`PKG_CONFIG_PATH` para dependencias `native: true` en un build cruzado
+-- aislado además con una invocación de `pkg-config` standalone
+(fuera de Meson) que sí resolvía `hwdata.pc` correctamente con el mismo
+env var, confirmando que el bug es específico de cómo Meson arma su
+entorno para ese código de resolución de dependencias nativas.
+
+**Fix correcto aplicado:** reemplazar el prefijo inline por un
+`--native-file` real de Meson (análogo al `write_meson_crossfile()` ya
+usado para el `--cross-file`, pero para el lado nativo), con contenido:
+
+```ini
+[built-in options]
+pkg_config_path = ['${HWDATA_NATIVE_INSTALL}/share/pkgconfig']
+```
+
+pasado junto al `--cross-file` existente. Compiló limpio a la primera
+con este cambio.
+
+**Lección:** una dependencia Meson `native: true` en un build cruzado
+NO hereda `PKG_CONFIG_PATH` del shell que invoca, aunque `pkg-config`
+standalone con el mismo env var sí funcione. La única forma confiable
+de inyectarle un pkgconfig path adicional es un `--native-file` con
+`[built-in options] pkg_config_path = [...]`.
+
+### KGlobalAccelD -- ✅ COMPLETO, último de los 5 prerequisitos originales
+
+Compiló limpio con `_plasma_cmake_build KGlobalAccelD kglobalacceld`,
+sin ningún bug real. Instala TANTO una librería
+(`libKGlobalAccelD.so.0`, sin symlink `.so` sin versión -- confirmado,
+no hace falta para lo que lo consume) COMO el daemon real
+(`/usr/lib/libexec/kglobalacceld`, activado por systemd/dbus vía
+`plasma-kglobalaccel.service`). El verify inicial (placeholder genérico
+con `find -iname '*kglobalaccel*'`) se reemplazó por chequeos exactos
+de ambos artefactos reales.
+
+### KScreenLocker -- 🟡 en compilación, sexto hallazgo real del bug sistémico de X11 (el más grande hasta ahora)
+
+**Trampa real:** el `CMakeLists.txt` de `invent.kde.org/plasma/kscreenlocker`
+rama `master` (fetch inicial, vía WebFetch) YA no tiene ningún check de
+X11 -- upstream lo sacó por completo en una versión posterior a la
+6.7.4 que tenemos pineada. El research inicial contra `master` dio
+"sin X11, sin sorpresas" y llevó a escribir `step_kscreenlocker()` sin
+ningún patch. El build real contra el TARBALL 6.7.4 (no contra
+`master`) falló de entrada:
+
+```
+-- Could NOT find X11 (missing: X11_X11_LIB)
+-- Could NOT find XCB_KEYSYMS (missing: XCB_KEYSYMS_LIBRARY XCB_KEYSYMS_INCLUDE_DIR) (found version "")
+-- Could NOT find XCB_UTIL (missing: XCB_UTIL_LIBRARY XCB_UTIL_INCLUDE_DIR) (found version "")
+CMake Error ... Could NOT find XCB (missing: KEYSYMS UTIL) (found version "1.17.0")
+```
+
+**Lección (nueva, distinta a la de GitHub/tags):** para un paquete de
+KDE que sigue el release train de Plasma, el `CMakeLists.txt` de la
+rama `master` de `invent.kde.org` puede estar MUY adelantado respecto
+al tag/tarball realmente pineado (acá, meses de diferencia de refactors
+de X11) -- nunca alcanza con mirar `master`, hay que leer el
+`CMakeLists.txt` DEL TARBALL YA EXTRAÍDO cuando algo no cierra con lo
+que dice `master`.
+
+**Causa raíz real** (leída directamente del `CMakeLists.txt` del
+tarball 6.7.4 extraído dentro del contenedor): `find_package(XCB MODULE
+REQUIRED COMPONENTS XCB KEYSYMS UTIL XTEST)` -- REQUIRED de verdad, sin
+ningún guard -- más `X11::X11`/`XCB::UTIL` linkeados directo (sin guard)
+en `greeter/CMakeLists.txt`. Investigando el USO real de X11 en el
+código (no sólo el `find_package`), se confirmó el mismo patrón
+sistémico ya documentado para `KX11Extras` y `libkscreen`, pero repartido
+en **3 archivos** en vez de 1-2:
+
+- **`ksldapp.cpp`**: `m_isX11 = X11Info::isPlatformX11()` gatea en
+  runtime 6 bloques de código real (`initializeX11()` con
+  `XGetScreenSaver`/`XSetScreenSaver`, `establishGrab()` con
+  `XSync`/`XServerGrabber`/`grabKeyboard()`/`grabMouse()` -- Xlib real
+  vía `XGrabKeyboard`/`XGrabPointer`/`XIGrabDevice` --, y
+  `showLockWindow()` instanciando la clase `X11Locker`). Además,
+  `cleanUp()` tenía una llamada a `XSetScreenSaver()` **sin ningún
+  guard de `m_isX11`** -- bug real aparte, no sólo el patrón de
+  siempre.
+- **`globalaccel.cpp`**: `X11Info::isPlatformX11()` gatea
+  `xcb_key_symbols_alloc()`/`xcb_key_symbols_free()` (de
+  `xcb-util-keysyms`, un paquete aparte que no tenemos) y
+  `checkKeyPress()` usa símbolos de `<X11/keysym.h>` (Xlib real) para
+  interpretar keypads.
+- **`greeter/greeterapp.cpp`**: `KWindowSystem::isPlatformX11()` gatea
+  la clase `FocusOutEventFilter` (necesita `xcb_event.h` de
+  `xcb-util`) y un bloque `XInternAtom`/`XChangeProperty` (Xlib real).
+
+`doUnlock()` (en `ksldapp.cpp`) usa `xcb_ungrab_keyboard`/
+`xcb_ungrab_pointer`/`xcb_flush` -- funciones del núcleo de `libxcb`
+(NO de `xcb-util`) -- así que ese bloque compila fino con nuestro
+libxcb mínimo y no hizo falta tocarlo. `Qt::X11BypassWindowManagerHint`
+y `org_kde_ksld_x11window` (protocolo Wayland `ksld.xml`) tampoco son
+símbolos de Xlib/xcb-util pese al nombre, no se tocaron.
+
+**Decisión, confirmada con Juani antes de tocar el código** (por ser
+justo el componente de bloqueo de pantalla -- área de seguridad -- y
+ser bastante más grande que los parches anteriores): mismo criterio ya
+aprobado para `KX11Extras`/`libkscreen` -- sacar el código X11 muerto
+en vez de compilar Xlib/xcb-util real, ya que TODO uso real está detrás
+de un runtime-check que siempre da `false` en un release Wayland puro
+(`m_isX11`/`KWindowSystem::isPlatformX11()` nunca detectan una sesión
+X11 si no hay ningún QPA `xcb` cargado). Aplicado vía
+`_patch_kscreenlocker()` (mismo hook genérico `_patch_<tarname>` de
+siempre): saca `find_package(X11)`/`find_package(XCB ...)` y
+`x11locker.cpp/.h` de `CMakeLists.txt`; fuerza `m_isX11 = false` y
+elimina `initializeX11()`, el grab real completo
+(`establishGrab`/`grabKeyboard`/`grabMouse`/`XServerGrabber`) y el
+`X11Locker`/`XSync` final de `showLockWindow()` en `ksldapp.cpp`; saca
+la asignación/liberación de `m_keySymbols` y reduce `checkKeyPress()` a
+`return false;` (su comportamiento real, dado que `m_keySymbols` nunca
+se asignaba) en `globalaccel.cpp`; saca `X11::X11`/`XCB::UTIL` de
+`greeter/CMakeLists.txt`; y saca `FocusOutEventFilter` + el bloque
+`XInternAtom`/`XChangeProperty` de `greeter/greeterapp.cpp`.
+
+Dependencias reales confirmadas SÍ correctas (todas ya en el sysroot,
+ninguna dependencia nueva): ECM; Qt6 DBus/Widgets/Quick/Test; KF6
+Crash/KCMUtils/KIO/GlobalAccel/I18n/IdleTime/Notifications/Solid/
+WindowSystem/XmlGui/Svg; PlasmaQuick; LayerShellQt; KF6Screen; PAM.
+Tarball real: `kscreenlocker-6.7.4.tar.xz` (confirmado en el listado de
+`download.kde.org/stable/plasma/6.7.4/`).
+
+**Tres rondas más de errores reales tras el primer intento del patch**
+(cada una resuelta con el mismo criterio: leer el error real, confirmar
+contra el source real, corregir):
+
+1. `CMakeLists.txt:199 (target_link_libraries): Target "KScreenLocker"
+   links to: X11::X11 ... but the target was not found` -- había un
+   SEGUNDO lugar con `X11::X11`/`XCB::KEYSYMS` linkeados directo, en el
+   target de la librería principal `KScreenLocker` (no sólo en
+   `greeter/CMakeLists.txt`, que ya estaba parcheado). Agregado a la
+   misma lista de reemplazos de `CMakeLists.txt`.
+2. Mismo error, ahora con `XCB::XCB` -- al sacar el `find_package(XCB
+   ...)` ENTERO (no sólo X11), también se perdió el target CMake
+   `XCB::XCB` que sí usa de verdad `doUnlock()` (vía `xcb_ungrab_keyboard`/
+   `xcb_ungrab_pointer`, del núcleo de libxcb, ya en el sysroot). Fix:
+   en vez de sacar el `find_package(XCB ...)` del todo, se lo angosta a
+   `find_package(XCB MODULE REQUIRED COMPONENTS XCB)` -- sólo el
+   componente núcleo, sin KEYSYMS/UTIL/XTEST.
+3. `ksldapp.cpp:459:31: error: 'X11Info' has not been declared` --
+   `doUnlock()` usa `X11Info::connection()`, pero `X11Info` vive en
+   `x11info.h`, que ya se había sacado del todo del archivo. Se creía
+   que este bloque "compilaba fino" por usar sólo xcb núcleo -- cierto
+   para las funciones xcb, pero no para el namespace `X11Info` en sí.
+   Fix: sacar el bloque completo `if (m_isX11) { ... }` de `doUnlock()`
+   (dead code, igual que los demás).
+4. `globalaccel.cpp:8:10: fatal error: KKeyServer: No such file or
+   directory` -- `KKeyServer` (utilidad de conversión de keysyms/
+   modificadores) es parte de **KWindowSystem** (`src/kkeyserver.h`),
+   ya compilado en Tier 2 hace semanas, pero su instalación está
+   gateada a soporte X11 real (confirmado en su `CMakeLists.txt`: "we
+   install kkeyserver_x11.h which needs the X11 headers available") --
+   igual que build de KWindowSystem sin X11 (mismo criterio de
+   siempre), el header nunca se instaló. De sus funciones, sólo
+   `isShiftAsModifierAllowed()` seguía viva en runtime real (en
+   `keyEvent()`, la ruta de shortcuts Wayland) tras sacar el código
+   muerto de `checkKeyPress()` -- lógica pura de `Qt::Key`, sin nada de
+   Xlib/xcb pese a vivir en un header gateado a X11. En vez de re-tocar
+   KWindowSystem (Tier 2 ya cerrado), se copió esa función verbatim
+   (confirmada línea por línea contra `kwindowsystem-6.29.0/src/
+   kkeyserver.cpp`, líneas 106-297) como estática local de
+   `globalaccel.cpp`. `calculateGrabMasks()` (única otra función que
+   usaba `KKeyServer::`, ya muerta tras sacar su único caller) se sacó
+   también -- de lo contrario fallaba igual por símbolos indefinidos
+   aunque nunca se llamara.
+5. `globalaccel.cpp:8:10: fatal error: netwm.h: No such file or
+   directory` -- mismo patrón que KKeyServer (el `netwm.h` completo de
+   KWindowSystem vive en `src/platforms/xcb/netwm.h`, sólo con X11
+   real), pero acá NINGÚN símbolo `NET::`/`NETWinInfo` se usaba en todo
+   el archivo -- era un include muerto, no una dependencia real. Se
+   sacó directo.
+
+**Resultado final: ✅ COMPLETO**, compiló y se instaló limpio. Artefactos
+reales confirmados vía el log de instalación:
+`/lfs/usr/lib/libKScreenLocker.so{,.6,.6.7.4}` (con symlink sin versión
+esta vez, a diferencia de KGlobalAccelD), `/lfs/usr/lib/libexec/
+kscreenlocker_greet` (el greeter), `/lfs/usr/lib/plugins/plasma/kcms/
+systemsettings/kcm_screenlocker.so` (el KCM de configuración). Verify
+actualizado con estos 3 paths exactos.
+
+**Con esto se cierran los 5 prerequisitos de kwin** identificados
+contra su `CMakeLists.txt` real: lcms2 ✅, libdisplay-info ✅,
+KGlobalAccelD ✅, libepoxy ✅, KScreenLocker ✅. Próximo paso real:
+investigar y escribir `step_kwin()` (Tier 5) con `KWIN_BUILD_X11=OFF`.
+
+## Tier 5 (kwin) -- ✅ COMPLETO (2026-09-16), 13 intentos reales hasta compilar limpio
+
+Investigado contra el `CMakeLists.txt` REAL del tarball
+`kwin-6.7.4.tar.xz` extraído (no contra `invent.kde.org/plasma/kwin`
+rama `master` -- lección aprendida recién con KScreenLocker: `master`
+puede estar meses adelantado o atrasado respecto al tag pineado). Con
+`KWIN_BUILD_X11=OFF`, kwin gatea TODO lo X11/XCB (15 componentes XCB +
+X11_XCB + Xwayland + X11 real) dentro de un `if(KWIN_BUILD_X11)`
+correcto -- a diferencia de KScreenLocker, upstream lo hizo bien acá,
+sin necesitar ningún patch para ESE bloque.
+
+### Tres prerequisitos nuevos, descubiertos recién al CORRER el build real
+
+**1. Vulkan (Headers + Loader)** -- `find_package(Vulkan REQUIRED)`
+fallaba con "Could NOT find Vulkan". Se creía cubierto por Mesa (Fase 6
+Parte 2), pero Mesa sólo instala los DRIVERS ICD
+(`libvulkan_radeon.so`/`libvulkan_intel.so` + manifests JSON en
+`/usr/share/vulkan/icd.d/`) -- el LOADER real (`libvulkan.so`, lo que
+las apps linkean, que hace `dlopen()` del ICD correcto en runtime) y
+los headers (`vulkan/vulkan.h`) son DOS proyectos aparte de
+KhronosGroup, nunca compilados. Se agregaron `Vulkan-Headers` (header-
+only, sin dependencias) y `Vulkan-Loader` (con
+`BUILD_WSI_XCB_SUPPORT=OFF`/`BUILD_WSI_XLIB_SUPPORT=OFF`/
+`BUILD_WSI_XLIB_XRANDR_SUPPORT=OFF` -- gateo real y limpio de CMake,
+sin necesitar ningún patch), pineados a `v1.4.362` (ambos taggean en
+lockstep). Ambos compilaron limpio a la primera.
+
+**2. libxcvt** -- `pkg_check_modules(Libxcvt ... libxcvt>=0.1.1
+REQUIRED)` (no aparece con `find_package()`, por eso no salió en el
+mapeo inicial). Pese al nombre (viene del mundo Xorg/DRM), es sólo el
+algoritmo VESA CVT para generar modelines de video -- matemática pura
+(confirmado leyendo su `meson.build` real: única dependencia es
+`libm`), usada por el backend DRM de kwin. `gitlab.freedesktop.org`
+bloquea la navegación (Anubis) pero la descarga directa del tarball
+funciona igual (mismo caso ya documentado para libdisplay-info) --
+confirmado con un `wget` real. Versión real: `0.1.3` (Arch Linux la
+empaqueta; el propio repo no lista releases navegables por el
+bloqueo). Compiló limpio a la primera.
+
+**3. KNightTime + 2 dependencias reales (Qt6 Positioning,
+KF6Holidays)** -- el `feature_summary()` final marcaba KNightTime
+(`>= 6.7.0`, `TYPE REQUIRED`, "Needed for Night Light") como faltante.
+Es del tren de Plasma (`knighttime-6.7.4.tar.xz`, calcula amanecer/
+atardecer). Su `CMakeLists.txt` real pide Qt6 Positioning (submódulo
+de Qt6 nunca compilado hasta ahora, mismo tren QT6_VERSION de siempre)
+y KF6Holidays (framework KDE, mismo tren KDE_VERSION de siempre --
+pide FLEX+BISON REQUIRED para generar un parser real, "plan2 parser",
+pero ambos ya vienen en la imagen del contenedor, confirmado con
+`which flex bison`). Los 3 compilaron limpio a la primera, en cadena
+(qtpositioning → kholidays → knighttime).
+
+### El problema real más grande: `KF6_HOST_TOOLING` (7 iteraciones)
+
+**Síntoma inicial:** `src/wayland/tools/CMakeLists.txt:18: Please
+provide a prefix with a native Qt build and pass
+-DKF6_HOST_TOOLING=path`. Es el mismo problema de fondo de siempre
+(herramienta de build-time -- acá `qtwaylandscanner_kde` -- que no
+puede correr cruzada), pero por primera vez kwin lo resuelve con un
+mecanismo propio: un `ExternalProject_Add()` real que compila una
+copia nativa de esa única herramienta usando
+`-DCMAKE_PREFIX_PATH=${NATIVE_PREFIX}` (NATIVE_PREFIX se deriva
+recortando `KF6_HOST_TOOLING` en la PRIMERA aparición de "/lib").
+
+**Trampa real:** `KF6_HOST_TOOLING` NO es exclusivo de kwin -- es una
+convención de KDE Frameworks entera. `KF6ConfigConfig.cmake`/
+`KF6PackageConfig.cmake`/`KF6KCMUtilsConfig.cmake` (los mismos 3
+frameworks con herramientas de build-time de siempre, ver Tier 3) miran
+la MISMA variable global para decidir si buscar su
+`*CompilerTargets.cmake`/`*ToolsTargets.cmake`/`*ToolingTargets.cmake`
+nativo en vez del cruzado. Apenas se define (obligatorio para
+wayland/tools), los 3 lookups se activan sí o sí.
+
+**Iteración 1 (symlink de directorio a `KF6_NATIVE_INSTALL/lib/
+x86_64-linux-gnu/cmake`, con Qt6 symlinkeado adentro):** falló primero
+en `KF6PackageToolsTargets.cmake` -- nunca se había compilado
+`kpackagetool6` nativo (nadie lo había necesitado hasta ahora).
+Analizando el archivo real (`kpackage/CMakeLists.txt:115` +
+`src/kpackagetool/CMakeLists.txt:16`) se confirmó que exporta un ÚNICO
+target, y que nada en el build de kwin lo invoca de verdad -- construir
+KPackage entero nativo (con KArchive+KI18n+KCoreAddons nativos en
+cadena) hubiese sido desproporcionado. Se escribió un stub propio
+(`add_executable(KF6::kpackagetool6 IMPORTED)` con
+`IMPORTED_LOCATION` apuntando al binario CRUZADO real del sysroot) en
+vez de compilar nada nuevo.
+
+**Iteración 2:** el mismo síntoma reapareció con `Qt6::syncqt` (target
+interno de `Qt6CoreTools`, tirado por la cadena `find_package(Qt6 ...
+Core)`) -- **causa raíz real, la misma en TODAS las iteraciones
+siguientes**: los `*Targets.cmake` que CMake genera calculan su
+`_IMPORT_PREFIX` navegando ".." un número FIJO de niveles relativo a
+su propia ubicación real. `QT6_NATIVE_INSTALL` instala sin segmento
+multiarch (`lib/cmake/...`, 3 niveles) pero `KF6_NATIVE_INSTALL`
+instalaba CON segmento multiarch (`lib/x86_64-linux-gnu/cmake/...`, 4
+niveles) -- GNUInstallDirs detecta multiarch en builds nativos
+(contenedor Debian), la cruzada no. Symlinkear un archivo a una
+profundidad distinta de la que asume rompe el cálculo con un path sin
+sentido cada vez (confirmado con 3 casos reales:
+`kf6-native-install/lib/bin/kpackagetool6`, y después variantes
+similares para `syncqt`/`kconfig_compiler_kf6`/`kconf_update`).
+
+**Iteración 3, la que quedó (fix real de la causa raíz):** se agregó
+`-DCMAKE_INSTALL_LIBDIR=lib` a `step_kconfig_native()` y
+`step_kcmutils_native()` (retrofit sobre pasos ya completos de Tier 2/3)
+para que instalen SIN el segmento multiarch, alineando su profundidad
+con `QT6_NATIVE_INSTALL`. Con las dos profundidades iguales,
+`KF6_HOST_TOOLING` pasa a ser directamente
+`${QT6_NATIVE_INSTALL}/lib/cmake` (el árbol REAL de Qt6, sin ningún
+symlink) y sólo hace falta symlinkear ADENTRO los 2 paquetes KF6 que sí
+existen (`KF6Config`, `KF6KCMUtils`) más el stub de `KF6Package`.
+`KCMUTILS_NATIVE_TOOL`/`KCONFIG_NATIVE_TOOL` se actualizaron a las
+rutas nuevas (`lib/libexec/kf6/...`, sin multiarch).
+
+**Iteraciones 4-6:** con la profundidad ya alineada, `KF6Config`/
+`KF6KCMUtils` symlinkeados como DIRECTORIO calculan su `_IMPORT_PREFIX`
+correctamente (¡`qt6-native-install`, el prefix del symlink!) -- pero
+eso NO es donde vive el binario real (`kf6-native-install`, un prefix
+FÍSICO distinto). Se resolvió symlinkeando los 3 BINARIOS reales
+(`kconfig_compiler_kf6`, `kconf_update`, `kcmdesktopfilegenerator` --
+confirmados los 3 nombres reales grepeando
+`KF6ConfigCompilerTargets.cmake`/`KF6KCMUtilsToolingTargets.cmake`
+directo, sin ir de a uno por prueba y error) en
+`${QT6_NATIVE_INSTALL}/lib/libexec/kf6/`, exactamente en el path que el
+cálculo de `_IMPORT_PREFIX` espera.
+
+**Lección (aplica a todo el proyecto, no sólo kwin):** un symlink a un
+archivo/directorio generado por `install(EXPORT ...)` de CMake NO es
+equivalente a que el archivo esté físicamente ahí -- estos archivos
+casi siempre calculan rutas relativas a su propia ubicación en vez de
+usar rutas absolutas. La única forma robusta de "mover" un
+`*Targets.cmake` exportado a otro lugar es: (a) que el prefix real
+tenga la MISMA profundidad de directorio que el original, o (b)
+generar un stub propio con rutas absolutas ya resueltas, sin ningún
+cálculo relativo.
+
+### Cuarto hallazgo real del bug sistémico de X11 (el mismo de
+libplasma/libkscreen/KScreenLocker, pero mucho más chico esta vez)
+
+`ninja` falló compilando `dialoghelper.cpp` (helper standalone del
+diálogo "aplicación no responde"): `fatal error: private/
+qtx11extras_p.h: No such file or directory`. Búsqueda en todo el árbol
+de kwin encontró 5 archivos con el patrón, pero sólo 2 tenían el bug
+real:
+
+- `src/helpers/dialoghelper/dialoghelper.cpp` y `src/helpers/killer/
+  killer.cpp` (diálogos standalone de "no responde"/"terminar
+  aplicación"): include sin guard, uso real (`QX11Info::
+  setAppUserTime()`) detrás de un runtime-check real
+  (`platformName() == "xcb"`, siempre falso acá) -- parcheados sacando
+  el include y el bloque `if (isX11) { ... }`.
+- `src/main.cpp`: tiene el MISMO include, pero ya está bien guardeado
+  por upstream con `#if KWIN_BUILD_X11 ... #endif` real -- no hacía
+  falta tocarlo.
+- `group.cpp`/`x11window.cpp`: ya estaban 100% excluidos de la
+  compilación por el propio `if (KWIN_BUILD_X11) target_sources(...)`
+  del `CMakeLists.txt` -- tampoco hacía falta tocarlos.
+
+`doUnlock()`-style usos de xcb CORE puro (`xcb_generic_event_t` etc.
+en `main.cpp`) compilan fino con nuestro libxcb mínimo, sin parche --
+mismo criterio que en KScreenLocker.
+
+### Resultado final
+
+Compiló e instaló limpio: `/lfs/usr/bin/kwin_wayland` (el binario
+principal -- NO "kwin" a secas), `/lfs/usr/bin/kwin_wayland_wrapper`,
+`/lfs/usr/lib/libexec/kwin_dialog_helper`,
+`/lfs/usr/lib/libexec/kwin_killer_helper`. Verify actualizado con estos
+4 paths exactos.
+
+**Próximo paso real**: `step_plasma_workspace()` (Tier 5, último
+paquete de Fase 6 Parte 3) -- sin research todavía.
+
+## plasma-workspace (Tier 5) -- ✅ COMPLETO (2026-09-17), cadena de 20 prerequisitos nuevos + el bug sistémico de X11 más grande del proyecto
+
+Investigado contra el `CMakeLists.txt` REAL del tarball
+`plasma-workspace-6.7.4.tar.xz` (46 `find_package()` reales). X11
+gateado limpio con 2 options de CMake reales (`WITH_X11`/
+`WITH_X11_SESSION`, default ON los dos) -- se apagan los dos, sin
+necesitar ningún patch. A diferencia de kwin (que sólo agregó 3
+prerequisitos nuevos), plasma-workspace destapó una cadena mucho más
+larga -- 18 paquetes nuevos reales hasta ahora, casi todos compilados
+limpio a la primera con el nombre de librería adivinado correctamente
+(evidencia de que el research previo del proyecto para las dependencias
+"chicas" ya viene siendo sólido):
+
+**Directos de plasma-workspace:**
+- **QCoro6** (`v0.13.0`, github.com/danvratil/qcoro) -- wrapper de
+  corutinas C++20 sobre Qt6. `QCORO_WITH_QTWEBSOCKETS=OFF` (no
+  compilado, sólo se pide el componente Core); se instala como
+  ESTÁTICA (`.a`, no `.so`).
+- **ICU4C** (`78.3`, unicode-org/icu) -- el más complicado de compilar
+  de toda la sesión, 3 bugs reales distintos:
+  1. `rm: symbol lookup error: libc.so.6: undefined symbol:
+     __pointer_chk_guard` durante `make install` (pkgdata invocando
+     `rm`/`ln` vía `system()` con un `LD_LIBRARY_PATH` apuntando al
+     build nativo) -- resuelto con `--with-data-packaging=archive` en
+     vez de perseguir la causa exacta dentro de pkgdata.
+  2. `out/tmp/icudata.lst: No such file or directory` -- bug real de
+     upstream en `data/Makefile`: la rama "ICUDATA_SOURCE_IS_NATIVE_TARGET"
+     hace `echo "$@" > $@` sin crear `$(OUTTMPDIR)` antes (la otra rama
+     sí lo hace) -- se crea el directorio a mano antes de `make`.
+  3. Build cruzado de dos pasadas real, documentado oficialmente
+     (unicode-org.github.io/icu/userguide/icu4c/build.html): un build
+     NATIVO completo primero (`runConfigureICU Linux`, sin install,
+     sólo queda el directorio de build), después el cruzado con
+     `--with-cross-build=<dir nativo>`.
+- **libxcvt** (`0.1.3`, xorg/lib/libxcvt) -- descubierto vía
+  `pkg_check_modules`, no `find_package()` (por eso no salió en el
+  mapeo inicial de kwin). Matemática pura (algoritmo VESA CVT), sin
+  nada de X11 pese al nombre.
+- **Qt6 Location** (submódulo separado de Qt6Positioning, tarball real
+  distinto) -- `find_package(Qt6 ... COMPONENTS Location)`.
+- **KF6NetworkManagerQt** (`networkmanager-qt`, con guiones -- no
+  "knetworkmanagerqt") -- pide `libnm>=1.4.0` vía `pkg_search_module`
+  REQUIRED. **Este es el bloqueo actual** -- ver abajo.
+
+**7 frameworks KF6 nuevos** (`find_package(KF6 ... COMPONENTS ... KDED
+Parts Prison StatusNotifierItem TextEditor TextWidgets Wallet)`,
+ninguno en el mapa original de Tier 2):
+- **KDED**: sin librería, sólo el daemon `kded6`.
+- **KParts**: sin sorpresas.
+- **KStatusNotifierItem**: `-DWITHOUT_X11=ON` (X11 opcional, sin
+  REQUIRED, pero se apaga explícito por prolijidad).
+- **Prison** (códigos QR/barras): pide `libqrencode` SIEMPRE (sin
+  opción para sacarlo) -- `-DWITH_DMTX=OFF -DWITH_ZXING=OFF` para los
+  2 backends opcionales que si quedan prendidos piden libdmtx/
+  zxing-cpp. **Bug real de link**: `libqrencode.a` se compila sin
+  `-fPIC` por default -- falla al linkearla DENTRO de
+  `libKF6Prison.so` (`relocation ... can not be used when making a
+  shared object`) -- fix: `-DCMAKE_POSITION_INDEPENDENT_CODE=ON` en el
+  build de libqrencode.
+- **KWallet**: la cadena de dependencias más larga de todas --
+  `LibGcrypt` REQUIRED real (`kwalletd needs libgcrypt to perform
+  PBKDF2-SHA512 hashing`), NO opcional (a diferencia de `Gpgmepp`/GPGME,
+  que sí lo es -- se deja sin construir). `ksecretd` (el daemon
+  freedesktop Secret Service, alternativo a `kwalletd`) pide
+  `Qca-qt6 REQUIRED` aparte -- se deshabilita con
+  `-DBUILD_KSECRETD=OFF` en vez de agregar QCA (confirmado que
+  `kwalletd`, el daemon clásico, es independiente y sigue funcional
+  con sólo libgcrypt). `kwalletd` en sí pide `libsecret-1` REQUIRED
+  (vía pkg-config) sin ninguna opción. **Bug real de upstream**: dos
+  archivos de `kwalletbackend` (`blowfish.h`, `sha1.cc`) incluyen
+  `<stdint.h>` condicionado a `HAVE_STDINT_H`, un macro de
+  `check_include_files(stdint.h ...)` que da **falso negativo** en
+  nuestro build cruzado (mismo síntoma ya visto sin consecuencia en
+  otros checks de este proyecto) -- error real:
+  `'uint32_t' was not declared in this scope`. Se sacó el guard
+  (`_patch_kwallet()`, primer uso real del hook de patch en
+  `_kf6_cmake_build()` -- antes sólo lo tenía `_plasma_cmake_build()`,
+  se agregó ahí también).
+- **KTextWidgets** y **KTextEditor**: piden Qt6 TextToSpeech
+  (submódulo `qtspeech`, nunca compilado). En KTextEditor es
+  REQUIRED sin ninguna opción para sacarlo. `qtspeech` a su vez
+  **no configura NINGÚN target** si no encuentra Qt6Multimedia
+  (opcional, pero sin él qtspeech se salta entero: "Skipping the
+  build as the condition 'TARGET Qt6::Multimedia' is not met") --
+  se agregó **Qt6 Multimedia** (submódulo `qtmultimedia`) también,
+  compilando sin ningún backend real (GStreamer/FFmpeg/PipeWire vía
+  `qt_feature()`, ninguno REQUIRED) -- sólo hace falta que exista el
+  target CMake, no audio/video funcional de verdad.
+  KTextEditor también pide **KSyntaxHighlighting** (framework KF6
+  nuevo) y **KParts**, y `KAuth` si `ENABLE_KAUTH` (default ON en
+  Linux real, no un caso de confundir host con target) --
+  `-DENABLE_KAUTH=OFF` para no agregar KAuth+polkit especulativamente.
+  KTextWidgets también pide **Sonnet** (corrección ortográfica) --
+  **nunca se había compilado en este proyecto pese a figurar como "ya
+  construido" en el mapa heredado de sesiones anteriores** (confirmado
+  que no existía ningún `KF6Sonnet*` real en el sysroot -- lección:
+  nunca confiar en un resumen de sesión vieja sin confirmar contra el
+  sysroot real). Sonnet en sí no pide nada externo nuevo --
+  `-DSONNET_NO_BACKENDS=ON` porque los backends reales (hunspell/
+  aspell) son opcionales y quedan sin construir (sin consumidor real
+  que exija corrección ortográfica funcional todavía).
+
+**Investigación tercerizada:** para mapear las dependencias reales de
+los 7 frameworks KF6 de una sola vez (en vez de una corrida real por
+cada uno), se delegó la investigación inicial a un sub-agente
+(fetch de los 7 `CMakeLists.txt` reales vía invent.kde.org). Su reporte
+tuvo un error real de mezclar plataforma HOST con plataforma TARGET
+(ej. "X11 se desactiva en Windows", "KAuth se desactiva en Windows") --
+como el TARGET de este proyecto es Linux (no importa que el build corra
+en un host Windows), esas conclusiones eran falsas para nuestro caso;
+se verificaron a mano las condiciones reales de CMake
+(`if (NOT WIN32 AND NOT HAIKU)`, etc.) contra nuestro TARGET antes de
+confiar en ellas -- lección: un sub-agente puede confundir contexto de
+plataforma igual que cualquier razonamiento sin verificación real.
+
+**Resuelto: KF6NetworkManagerQt pedía `libnm>=1.4.0` (NetworkManager)
+real vía pkg-config, sin ninguna opción para sacarlo.** A diferencia de
+todo lo anterior (bibliotecas chicas, autocontenidas), NetworkManager es
+un subsistema completo -- consultado con Juani si construirlo entero o
+pausar la sesión; eligió construirlo completo. Investigado contra el
+`meson.build` real de `NetworkManager/1.50` (Meson, `1.50.0` -- versión
+PAR, estable según la convención de versionado real de GNOME, confirmada
+con el marcador `LATEST-IS-1.50.0` real en
+`download.gnome.org/sources/NetworkManager/1.50/`):
+
+- **libndp** (`v1.9`, github.com/jpirko/libndp) -- única dependencia
+  nueva de verdad (`dependency('libndp')` sin opción, todo lo demás --
+  uuid, libudev, dbus-1, gio-unix-2.0/glib, polkit-gobject-1 -- ya
+  estaba en el sysroot). El tarball de GitHub no trae `configure`
+  pre-generado -- `autoreconf -fi` antes de `./configure`.
+- **Minimización agresiva de features** (no se quiere el daemon
+  completo, sólo `libnm` como librería cliente para KF6NetworkManagerQt):
+  `-Dppp=false -Dmodem_manager=false -Dovs=false -Dnmtui=false
+  -Dnm_cloud_setup=false -Dtests=no -Ddocs=false -Dintrospection=false
+  -Dvapi=false -Dqt=false -Dcrypto=null -Dlibpsl=false
+  -Dconcheck=false -Dnmcli=false`.
+- **Bug real de infraestructura:** `xsltproc` no estaba en la imagen del
+  contenedor (`find_program('xsltproc')` sin `required: false` en el
+  `meson.build` real). Al ser una herramienta NATIVA faltante (no del
+  sysroot cruzado), el fix real y durable es agregarlo al `Dockerfile`
+  (ítem 14 de su lista numerada) y reconstruir la imagen
+  (`podman-compose build builder`) -- distinto del patrón ya conocido de
+  "el filesystem del contenedor `--rm` es efímero": acá el fix vive en
+  la imagen misma, no en una escritura dentro de un contenedor de una
+  sola corrida.
+- **Bug real de gettext/ITS:** el merge de traducciones del `.policy` de
+  polkit (`msgfmt --xml`) fallaba porque gettext 0.21 no tenía reglas ITS
+  (Internationalization Tag Set) para `*.policy`. Confirmado leyendo
+  directo `/usr/share/gettext-0.21/its/metainfo.loc`/`.its` reales
+  dentro del contenedor (formato real: `.loc` es
+  `<locatingRules><locatingRule pattern="*.ext"><documentRule
+  localName="..." target="foo.its"/></locatingRule></locatingRules>`,
+  `.its` es ITS-2.0 estándar). **Gotcha real confirmado:** el `pattern`
+  se matchea contra el nombre de archivo CON el `.in` final YA SACADO
+  (el `metainfo.loc` real usa `pattern="*.metainfo.xml"` pese a que las
+  plantillas se llaman `*.metainfo.xml.in`) -- el primer intento con
+  `pattern="*.policy.in"` falló en silencio hasta corregirlo a
+  `pattern="*.policy"`. También confirmado que la variable de entorno
+  `GETTEXTDATADIRS` NO funcionó como mecanismo de inyección en este
+  build exacto de gettext 0.21 (probado con y sin, mismo error) -- el
+  único fix real fue escribir los archivos `.loc`/`.its` con `sudo tee`
+  DIRECTO en el path de búsqueda real confirmado
+  (`/usr/share/gettext-0.21/its/`), dentro de la MISMA invocación de
+  `podman-compose run` que el build real (seguro para un contenedor
+  efímero porque ambas cosas pasan en una sola corrida).
+- **PolkitQt6-1** (`0.201.1`) -- compilado aparte como prerequisito de
+  KF6NetworkManagerQt/plasma-workspace (verify corregido al nombre real
+  instalado: `libpolkit-qt6-core-1.so`).
+
+Con NetworkManager+libndp+PolkitQt6-1 resueltos, plasma-workspace pasó a
+compilar de verdad -- y ahí apareció el bug sistémico de X11 más grande
+de todo el proyecto (más grande incluso que KScreenLocker en kwin):
+
+### El bug sistémico de X11 en plasma-workspace (18+ archivos reales)
+
+Mismo patrón ya visto en libplasma/libkscreen/KScreenLocker/kwin: código
+fuente de KDE 6.7.4 que incluye headers exclusivos de X11 (`KX11Extras`,
+`KWindowInfo`, `KStartupInfo`, `KUserTimestamp`, `netwm.h`, `KKeyServer`,
+`xcb/xcb.h`, `qtx11extras_p.h`, `QNativeInterface::QX11Application`) SIN
+guard de preprocesador, pese a que el uso real de esos símbolos SÍ está
+protegido en tiempo de ejecución (`KWindowSystem::isPlatformX11()`) o a
+veces con un `#if HAVE_X11` real pero incompleto (guarda el uso, no el
+include). Encontrado y corregido con `ninja -k0` (colecta TODOS los
+errores reales de compilación en una sola pasada -- mucho más eficiente
+que el loop de un error a la vez para un patch surface de este tamaño) a
+lo largo de ~16 corridas reales, todo dentro de `_patch_plasma_workspace()`
+en `scripts/build-kde.sh`:
+
+- `CMakeLists.txt` -- `xembed-sni-proxy` y `gmenu-dbusmenu-proxy`
+  gateados detrás de `if(WITH_X11)` (antes se intentaban compilar
+  siempre).
+- `kcms/krdb/CMakeLists.txt`, `logout-greeter/CMakeLists.txt`,
+  `kcms/colors/CMakeLists.txt` (2 targets) -- sacado el link
+  incondicional a `X11::X11`.
+- `appmenu/menuimporter.cpp`, `libnotificationmanager/server.cpp`,
+  `libnotificationmanager/portal_p.cpp`, `klipper/urlgrabber.cpp`
+  (include muerto), `soliduiserver/soliduiserver.cpp` (`KUserTimestamp`)
+  -- código muerto sacado.
+- `libtaskmanager/virtualdesktopinfo.cpp` -- 2 rondas: primero un
+  problema de ORDEN de macro (`#if HAVE_X11` referenciado ANTES del
+  `#include <config-X11.h>` que lo define -- error real de
+  `-Werror=undef`, hay que mover el bloque guardado a DESPUÉS del
+  include), después el namespace local `X11Info` (usaba
+  `QNativeInterface::QX11Application`, un TIPO que no existe cuando el
+  propio Qt6 se compiló sin xcb/`FEATURE_xcb`).
+- `applets/kicker/windowsystem.cpp`, `applets/kicker/dashboardwindow.cpp`
+  (3 bloques) -- código muerto sacado.
+- `klipper/klipperpopup.cpp` (4 bloques, algunos con rama `else` real
+  preservada).
+- `applets/notifications/notificationwindow.cpp` (2 bloques),
+  `krunner/view.cpp` (5 bloques) -- código muerto sacado.
+- `logout-greeter/shutdowndlg.cpp` -- llamadas Xlib reales (no sólo
+  muertas) sacadas.
+- `shell/desktopview.cpp` -- 4 reemplazos, incluidas 2 condiciones
+  `QNativeInterface::QX11Application` (el mismo problema de TIPO
+  inexistente que en `virtualdesktopinfo.cpp`).
+- `shell/shellcorona.cpp` -- sólo el include (el uso ya estaba
+  guardado).
+- `shell/panelview.cpp` -- include + un `if` con
+  `compositingActive()` mal formado + 6 bloques `refreshStatus()` en
+  total (repartidos en 2 rondas), uno de ellos con rama real: `if
+  (isPlatformX11()) { KX11Extras::forceActiveWindow(...); } else {
+  showTemporarily(); }` colapsado a sólo `showTemporarily();`.
+- **`applets/notifications/notificationapplet.cpp`** -- el último en
+  caer, y el único con un error propio (no de upstream): al agregar un
+  guard de RUNTIME (`isPlatformX11()`) nuevo alrededor de una llamada
+  antes incondicional a `KX11Extras::forceActiveWindow()`, se guardó el
+  USO pero no el **`#include <KX11Extras>`** -- que sigue fallando
+  regardless del guard de runtime, porque el header no existe en el
+  sysroot. Peor: a diferencia de `soliduiserver.cpp`/`shellcorona.cpp`/
+  `panelview.cpp` (que YA traían `#include "config-X11.h"` en el
+  upstream original), este archivo nunca lo tuvo -- típeo real:
+  `"HAVE_X11" is not defined, evaluates to 0 [-Werror=undef]`. Fix real:
+  agregar `#include "config-X11.h"` + envolver tanto el include de
+  `<KX11Extras>` como el bloque de uso completo en `#if HAVE_X11 ...
+  #endif`.
+
+**Build final (build16, 2026-09-17): plasma-workspace compiló e instaló
+limpio, 0 `FAILED:` en todo el log.** `step_verify_plasma_workspace()`
+corregido con rutas reales confirmadas post-instalación -- **Plasma 6 NO
+instala un `ksmserver` standalone** (la sesión la maneja
+`plasma_session`/`startplasma-wayland`; sólo queda
+`ksmserver-logout-greeter` en `libexec/` y el `.notifyrc`, nada más,
+confirmado con `find` real). Verify real, corrido y en verde:
+`plasmashell`, `krunner`, `plasma_session`, `startplasma-wayland` (en
+`bin/`) + `ksmserver-logout-greeter` (en `lib/libexec/`).
+
+**Con esto, Fase 6 Parte 3 (Qt6 + KDE Frameworks/Plasma) queda
+COMPLETA.**
+
+## Fase 6 — Parte 3 (Qt6 + KDE Frameworks/Plasma) — 🟡 arrancada 2026-09-04
+
+Prerequisito de xkbregistry ya cumplido (ver más abajo). El trabajo real de
+Parte 3 (Qt6/KF6/kwin/plasma-workspace en sí) arrancó el mismo día: research
+completo contra fuente real antes de escribir nada (`invent.kde.org` y
+`github.com/qt` SÍ accesibles desde este sandbox, a diferencia de
+`gitlab.freedesktop.org`/`gitlab.gnome.org` en research anteriores —
+confirmado en vivo), y **Tier 0 (extra-cmake-modules) ya compilado, instalado
+y verificado en el sysroot**, primer intento, sin errores reales.
+
+### Decisiones tomadas (2026-09-04)
+
+- **Qt6 6.11.2** — último release estable real (confirmado contra los tags
+  reales de `github.com/qt/qtbase`). Supera cómodo el `QT_MIN_VERSION` real
+  que declara kwin (`6.10.0`, leído directo de su `CMakeLists.txt` real).
+  Mismo criterio de "vanguardia" que el resto del proyecto: última versión
+  real, no el piso mínimo de un consumidor.
+- **KDE Frameworks 6 + tren de Plasma en 6.29.0** — el `KF6_MIN_VERSION` real
+  que declaran kwin (`6.27.0`) y plasma-workspace (`6.26.0`) en sus propios
+  `CMakeLists.txt`; se fija el tren completo en `6.29.0`, el último
+  REALMENTE PUBLICADO en `download.kde.org/stable/frameworks/` (confirmado
+  en vivo listando ese directorio — la rama `master` de los repos
+  individuales ya apunta a `6.30.0` sin publicar todavía, no sirve como
+  fuente de versión real).
+- **XWayland/X11: sacado por completo, Wayland puro.** No es una preferencia
+  técnica improvisada de esta sesión — el propio documento fundacional del
+  proyecto (`docs/LINSI-OS.pdf`, Pilar 5 "Vanguardia", sección 2.5) lo dice
+  explícito: *"en lugar de mantener compatibilidad con X11 ... LINSI-OS se
+  construye exclusivamente sobre Wayland"*, y la sección 6 ("Originalidad")
+  lo repite: *"sin arrastrar compatibilidad con X11 ni PulseAudio"*. kwin
+  trae XWayland/X11 prendido por defecto (`KWIN_BUILD_X11=ON` en su
+  `CMakeLists.txt` real) — cuando se llegue a `step_kwin()`, va con
+  `KWIN_BUILD_X11=OFF` a propósito, sin libxcb/Xwayland en el sysroot.
+- **Alcance: todo desde el principio.** A diferencia del criterio "mínimo
+  primero" usado en Mesa (VA-API/glvnd/NVK afuera a propósito), acá se pidió
+  explícitamente el desktop completo desde el arranque — incluidas las
+  piezas que el `CMakeLists.txt` real de plasma-workspace no marca
+  `REQUIRED` (Baloo, NetworkManagerQt, PackageKitQt6, AppStreamQt,
+  KIOExtras/KIOFuse).
+
+### Mapa de dependencias confirmado (no inventado — contra los
+`find_package()` reales de `kwin` y `plasma-workspace`, bajados de
+`invent.kde.org`)
+
+El detalle completo, con las citas de línea de cada `find_package()`, vive
+en el header de `scripts/build-kde.sh` (nuevo script de esta parte, mismo
+patrón autocontenido que `build-mesa.sh` — no sourcea otros scripts de
+fase). Resumen por tier:
+
+- **Tier 0 — build tooling:** `cmake >= 3.29` (bloqueante real: el cmake de
+  apt del Dockerfile es 3.25.1, `extra-cmake-modules` exige 3.29 en su
+  propio `CMakeLists.txt` — resuelto con `pip3 install cmake>=3.29`, mismo
+  criterio ya usado para meson/Rust) + `extra-cmake-modules` (ECM) en sí
+  (sólo módulos `.cmake`, `LANGUAGES NONE`, nada que cross-compilar). **✅
+  Compilado, instalado y verificado — primer intento, sin errores reales**
+  (`logs/20260904-115956_build-kde_ecm.log` /
+  `logs/20260904-120013_build-kde_verify-ecm.log`).
+- **Tier 1 — Qt6 (CMake):** `qtbase`, `qtshadertools`, `qtdeclarative`,
+  `qtsvg`, `qt5compat`, `qttools`, `qtwayland`. Necesita un Qt NATIVO aparte
+  para cross-compilar (moc/rcc/qmlcachegen tienen que correr en el
+  contenedor de build) — mismo patrón "herramienta nativa aparte" ya
+  resuelto 4 veces en Fase 6 Parte 2 (mesa_clc/llvm-config/wayland-scanner/
+  glslangValidator), pero ésta es la pieza completa más delicada de Parte
+  3. **Sin empezar — research propio pendiente antes del primer
+  `step_qtbase_native()`.**
+- **Tier 2 — KDE Frameworks 6 (KF6 ≥ 6.27.0):** Auth, ColorScheme, Config,
+  CoreAddons, Crash, DBusAddons, GlobalAccel, GuiAddons, I18n, IdleTime,
+  Package, Service, Svg, WidgetsAddons, WindowSystem, Declarative,
+  KCMUtils, NewStuff, XmlGui, Runner, DocTools, NetworkManagerQt,
+  QuickCharts, UserFeedback, Baloo. Lista de componentes CONFIRMADA contra
+  los `find_package(KF6 ... COMPONENTS)` reales de kwin/plasma-workspace —
+  sus propias dependencias transitivas (KNewStuff en particular arrastra
+  KIO/Attica, bastante pesado) se descubren building, mismo método que ya
+  funcionó en Mesa. **Sin empezar.**
+- **Tier 3 — "tren de Plasma" (versionado junto a Plasma, no Frameworks):**
+  Plasma (libplasma), PlasmaQuick, KWayland (la de KDE, distinta de
+  `Qt6WaylandClient`), PlasmaActivities(+Stats), KSysGuard, KF6Screen,
+  LayerShellQt, KF6Kirigami+KF6KirigamiAddons, KNightTime, KDecoration3,
+  Breeze/Aurorae, Union, KWinDBusInterface, ScreenSaverDBusInterface,
+  PlasmaWaylandProtocols (protocolos XML propios de KDE, mismo patrón
+  wayland-scanner que wayland-protocols de Fase 6 Parte 1). **Sin
+  empezar.**
+- **Tier 4 — terceros nuevos** (nada de esto compilado en el proyecto
+  todavía): QCoro6, ICU, libcanberra, libei, lcms2, hwdata,
+  AccountsService, AppStreamQt, PolkitQt6-1, QAccessibilityClient6,
+  PackageKitQt6, KExiv2Qt6, KIOExtras, KIOFuse. **Sin empezar.**
+- **Tier 5 — kwin y plasma-workspace en sí** (con `KWIN_BUILD_X11=OFF`).
+  **Sin empezar.**
+
+### Tier 1 (Qt6) — primeros pasos reales (2026-09-04)
+
+- **`step_qtbase_native()` escrito y corrido — ✅ completo y verificado**
+  (`logs/20260904-121946_build-kde_qtbase-native.log` tras el fix,
+  `logs/20260904-122156_build-kde_verify-qtbase-native.log`). Primer build
+  NATIVO de Qt6 de todo el proyecto (mismo patrón "herramienta nativa
+  aparte" ya usado 4+ veces en Mesa, acá aplicado a Qt entero por primera
+  vez) — produce `moc`/`rcc`/`uic` + el paquete `Qt6CoreTools` que el build
+  CRUZADO va a necesitar vía `-DQT_HOST_PATH`.
+  - **Primer error real:** `ERROR: The OpenGL functionality tests failed!`
+    — CMake Error duro (no auto-disable), porque el contenedor no tiene
+    ningún dev package de OpenGL a nivel host (a propósito, este proyecto
+    nunca quiso GL del lado del contenedor). Confirmado contra
+    `src/gui/configure.cmake` real de qtbase 6.11.2: `opengl` depende de
+    `opengl_desktop`/`opengl_dynamic`/`opengles2`, controlados por el
+    switch documentado `INPUT_opengl` (equivalente CMake de
+    `./configure -opengl no` de qmake clásico). **Fix:**
+    `-DINPUT_opengl=no` — esta build nativa sólo importa por sus binarios
+    de herramientas, nunca renderiza nada.
+  - **Segundo hallazgo (falso negativo del propio verify, no un error de
+    build):** `step_verify_qtbase_native()` buscaba `moc`/`rcc`/`uic` en
+    `bin/`, pero Qt6 los instala en `libexec/` (confirmado en la corrida
+    real: `find` sobre el prefix nativo) — Qt6 separa binarios de cara al
+    usuario final (`bin/`) de herramientas de desarrollo "privadas"
+    (`libexec/`), y acá no hay ningún binario del primer tipo. **Fix:**
+    corregidas las tres rutas del verify.
+- **`step_qtshadertools_native()` escrito y corrido — ✅ completo y
+  verificado, sin errores reales de build** (compiló limpio al primer
+  intento: `qsb`, `libQt6ShaderTools.so`, `Qt6ShaderToolsTools` — mismo
+  prefix compartido `QT6_NATIVE_INSTALL`, vía `CMAKE_PREFIX_PATH` para
+  encontrar el `qtbase-native` recién instalado). Único ajuste necesario fue
+  al propio verify: `qsb` queda en `bin/` (no en `libexec/` como
+  moc/rcc/uic) — confirmado en la instalación real, corregido antes de
+  correr el verify por primera vez (no hizo falta un segundo intento
+  fallido).
+- **`step_qtdeclarative_native()` escrito y corrido — ✅ completo y
+  verificado, sin errores reales de build** (compiló limpio, más grande que
+  los dos anteriores — motor QML completo con Quick Controls/Labs/
+  QmlCompiler/etc. como submódulos internos, tardó más de 590s — corrió en
+  background y terminó con exit code 0). `qmlcachegen`/`qmltyperegistrar`
+  confirmados en `libexec/` + `Qt6QmlTools` instalado.
+  (`logs/20260904-124201_build-kde_verify-qtdeclarative-native.log`).
+- **Resuelto: NO hace falta un `qtwayland-native` aparte.** El
+  `qtwaylandscanner` (el scanner de protocolos que necesitaría un
+  `qtwayland-native`) YA quedó instalado como parte de `qtbase-native`
+  (`libexec/qtwaylandscanner` + el paquete `Qt6WaylandScannerTools` con sus
+  macros) — confirmado con un `find` real sobre el prefix nativo, Qt6
+  aparentemente empaquetó esta herramienta dentro de qtbase mismo en vez de
+  en el módulo qtwayland separado. **Con esto, el bootstrap NATIVO de Qt6
+  para este proyecto queda completo con sólo 3 módulos** (qtbase,
+  qtshadertools, qtdeclarative) — no hacen falta versiones nativas de
+  qtsvg/qt5compat/qttools/qtwayland (ninguno de esos aporta herramientas de
+  build-time que otro módulo necesite, a diferencia de los tres ya
+  compilados).
+- **`step_qtbase()` (build CRUZADO real) escrito y corrido — ✅ completo y
+  verificado.** Usa `write_cmake_toolchain()` + `-DQT_HOST_PATH=
+  "${QT6_NATIVE_INSTALL}"` (mecanismo real de `qtbase/cmake/README.md`) para
+  encontrar moc/rcc/uic/qsb/qmlcachegen/qtwaylandscanner de los 3 pasos
+  nativos. Confirmado en el sysroot: `libQt6Core.so`, `libQt6Gui.so`,
+  `libQt6Widgets.so`, `libQt6DBus.so`, `Qt6Config.cmake`
+  (`logs/20260904-125659_build-kde_verify-qtbase.log`).
+  - **Primer error real:** `Feature "opengl_desktop": Forcing to "ON" breaks
+    its condition ... WrapOpenGL_FOUND = "FALSE"`. La configuración inicial
+    usaba `-DINPUT_opengl=desktop`, asumiendo que como Mesa (Fase 6 Parte 2)
+    da Gallium/OpenGL completo para las 3 GPU del lab, correspondía el GL de
+    escritorio clásico. **Causa raíz, confirmada con un `find` real sobre el
+    sysroot:** Mesa nunca generó `libGL.so` — sólo `libGLESv2.so`/
+    `libGLESv1_CM.so`. El motivo es coherente con decisiones ya tomadas en
+    Fase 6 Parte 2: `build-mesa.sh` compila con `-Dplatforms=wayland`, sin
+    `-Dglx` ni glvnd, y el `libGL.so` clásico está atado a GLX/al dispatch
+    multi-vendor (glvnd) — ninguno de los dos está en este proyecto (el
+    header `GL/gl.h` sí se instala igual, pero eso no alcanza para
+    `find_library(GL)`). **Fix:** `-DINPUT_opengl=es2` — usa `libGLESv2.so`
+    (que sí existe) vía contexto EGL, el camino estándar que el propio Qt
+    documenta para setups Wayland-only sin GLX
+    (`doc.qt.io/qt-6/embedded-linux.html`, EGLFS/GLESv2).
+  - **Hallazgo importante para el resto de Tier 1:** qtbase por sí solo YA
+    instaló `Qt6WaylandClient` + `Qt6WaylandClientPlugins.cmake` +
+    `Qt6WlShellIntegrationPrivate` — el plugin QPA de Wayland (el que
+    permite a cualquier app Qt renderizar como cliente Wayland) parece venir
+    integrado adentro de qtbase mismo en esta versión, no exclusivamente del
+    módulo `qtwayland` separado. Sin confirmar todavía qué le falta al
+    módulo `qtwayland` en sí (probablemente `QtWaylandCompositor`, la
+    librería que un compositor como kwin necesita para el lado SERVIDOR del
+    protocolo, distinta del lado cliente que ya quedó cubierto acá) — se
+    confirma cuando se llegue a ese paso.
+- **`step_qtshadertools()` (CRUZADO) escrito y corrido — ✅ completo y
+  verificado, sin errores reales.** `libQt6ShaderTools.so` confirmado en el
+  sysroot (`logs/20260904-131126_build-kde_verify-qtshadertools.log`). A
+  diferencia del build nativo, este cruzado no instaló un binario `qsb`
+  cruzado (sólo la librería) — no bloqueante, nada de lo compilado hasta
+  ahora lo necesita.
+- **`step_qtdeclarative()` (CRUZADO) escrito y corrido — ✅ completo y
+  verificado, sin errores reales.** El módulo más grande de Tier 1 (motor
+  QML/Quick + QuickControls2/Labs/QmlCompiler completos), corrió en
+  background por superar el timeout de una sesión interactiva normal — exit
+  code 0, `libQt6Qml.so`/`libQt6Quick.so` confirmados
+  (`logs/20260904-132952_build-kde_verify-qtdeclarative.log`).
+- **Con esto, los 3 módulos Qt6 más delicados de Tier 1 (qtbase/
+  qtshadertools/qtdeclarative) están completos tanto nativos como cruzados,
+  sin ningún error real en el lado cruzado más allá del fix de
+  `INPUT_opengl` en qtbase.**
+- **`step_qtsvg()`, `step_qt5compat()` (CRUZADOS) — ✅ completos y
+  verificados, sin ningún error real** (`libQt6Svg.so`/
+  `libQt6Core5Compat.so` confirmados).
+- **`step_qttools()` — necesitó un `qttools-native` que el mapa original NO
+  había anticipado.** Primer intento del build CRUZADO falló en el
+  configure: `Failed to find the host tool "Qt6::lconvert". It is part of
+  the Qt6LinguistTools package`. A diferencia del resto de Tier 1 (donde el
+  build nativo sólo hacía falta si OTRO módulo consumía sus herramientas),
+  acá lo que pasa es que el propio módulo qttools invoca `lconvert`
+  internamente durante SU PROPIO build cruzado — mismo patrón de fondo que
+  moc/rcc/qsb/qmlcachegen, sólo que el consumidor es el mismo módulo. Se
+  agregó `step_qttools_native()` (mismo prefix compartido
+  `QT6_NATIVE_INSTALL`) y con eso el build cruzado terminó limpio.
+  `libQt6UiTools.so` (el componente que kwin pide explícito) confirmado.
+- **`step_qtwayland()` (CRUZADO) — ✅ completo y verificado, sin errores
+  reales.** `libQt6WaylandCompositor.so` confirmado — la pieza que faltaba
+  después de que qtbase ya trajera integrado el lado cliente
+  (`Qt6WaylandClient`).
+- **Tier 1 (Qt6) queda COMPLETO** — los 7 módulos (qtbase, qtshadertools,
+  qtdeclarative, qtsvg, qt5compat, qttools, qtwayland) compilados,
+  instalados y verificados en el sysroot, tanto en su forma nativa (donde
+  hacía falta: qtbase/qtshadertools/qtdeclarative/qttools) como cruzada.
+  Sigue Tier 2 (KDE Frameworks 6), que recién empieza con ECM ya en el
+  sysroot desde Tier 0.
+
+  **Nota aparte, incidente de infraestructura real durante este tramo (no
+  un bug de build):** en medio de `qttools`, el disco C: de Windows llegó a
+  0 bytes libres, lo que causó errores de compilación reales pero
+  engañosos ("Bus error" / "Input/output error" en `/tmp`) y terminó
+  corrompiendo el filesystem de la VM de Podman. Recuperado sin pérdida de
+  datos liberando espacio (papelera de reciclaje) — detalle completo en la
+  sección "Infraestructura — incidente real de disco" más arriba en este
+  mismo archivo. Mudar la VM a D: quedó pospuesto a propósito para cuando
+  haya tiempo de hacerlo con cuidado.
+
+### Sub-sección: prerequisito de xkbregistry (completo y confirmado
+2026-09-04)
 
 - **Parte 3 — Qt6 + KDE Frameworks/kwin/plasma-workspace + tema oscuro/Nerd
-  Fonts desde `/etc/skel/`:** no empezada, depende de la Parte 2. **Ya
-  sabemos que va a necesitar libxml2** (ver más arriba, libxkbcommon
-  compilado en Parte 1 sin xkbregistry por esto mismo) — cross-compilarlo y
-  reactivar `-Denable-xkbregistry=true` en `step_libxkbcommon()` es un
-  prerequisito de esta parte, no algo nuevo a descubrir ahí.
+  Fonts desde `/etc/skel/`:** todavía no arrancó (Qt6/KDE en sí), depende de
+  la Parte 2 (ya completa, ver más arriba). El prerequisito ya identificado
+  acá abajo desde antes (libxml2 + reactivar `-Denable-xkbregistry=true`)
+  quedó **escrito, sin correr todavía** (2026-09-04):
+  - **`step_libxml2()` nuevo en `build-desktop.sh`** (targets `libxml2` /
+    `verify-libxml2`, numerado "18b" a propósito, entre libinput y
+    libxkbcommon, sin renumerar el resto): libxml2 2.15.3 cross-compilado
+    con Meson (confirmado contra el `meson.build` real de
+    `GNOME/libxml2` tag `v2.15.3` que esta versión sí tiene build de Meson,
+    no hace falta autotools) — `-Dpython=disabled` (no cross-compilamos
+    Python, nadie en el proyecto usa los bindings) y `-Ddocs=disabled`
+    (sin xsltproc/docbook en el Dockerfile). Produce `libxml2.so` +
+    `libxml-2.0.pc` (confirmado el `filebase: 'libxml-2.0'` real del
+    `pkgmod.generate()`) + headers en
+    `${LFS_SYSROOT}/usr/include/libxml2/libxml/`.
+  - **`step_libxkbcommon()` actualizado:** ahora exige `libxml-2.0.pc` en el
+    sysroot antes de correr, y `-Denable-xkbregistry=false` pasó a `true` —
+    produce además `libxkbregistry.so` + `xkbregistry.pc` (confirmado contra
+    el `meson.build` real de libxkbcommon 1.13.2: `get_option(
+    'enable-xkbregistry')`, `filebase: 'xkbregistry'`). `step_verify_libxkbcommon()`
+    actualizado para chequear los dos artefactos nuevos, no sólo
+    `libxkbcommon.so`.
+  - Versión/mirror agregados a `env.sh`: `LIBXML2_VERSION="2.15.3"` (tag real
+    `v2.15.3` de `GNOME/libxml2`, sha256 real confirmado bajando el tarball:
+    `5c6060277173270356c3f1c321a640ab629bdabc5e5ba9095b99e00759ba0c39`,
+    extrae a `libxml2-2.15.3/` con el "v" pisado por GitHub, patrón normal
+    para este proyecto).
+  - **Validado con `bash -n` (limpio) sobre `build-desktop.sh` y `env.sh`.**
+    `shellcheck` sigue sin estar disponible en este entorno de trabajo (ni
+    host Windows ni `Dockerfile` del proyecto) — mismo aviso que el
+    Vigésimo cuarto error real de Fase 6 Parte 2, no se repite acá para no
+    dar por hecha una validación que no se hizo.
+  - **Corrido y confirmado el mismo día (2026-09-04), sin ningún error real
+    en ninguno de los dos pasos** — a diferencia del patrón habitual de este
+    proyecto (algo tira al menos un error real la primera vez), acá
+    `libxml2` compiló limpio al primer intento
+    (`logs/20260904-114350_build-desktop_libxml2.log`) y la recompilación de
+    `libxkbcommon` con `-Denable-xkbregistry=true` también
+    (`logs/20260904-114429_build-desktop_libxkbcommon.log`). Los cuatro
+    targets nuevos/tocados confirmados en verde:
+    ```
+    [OK] /lfs/usr/lib/libxml2.so
+    [OK] /lfs/usr/lib/pkgconfig/libxml-2.0.pc
+    [OK] /lfs/usr/include/libxml2/libxml/parser.h
+    [OK] /lfs/usr/lib/libxkbcommon.so
+    [OK] /lfs/usr/lib/libxkbregistry.so
+    [OK] /lfs/usr/lib/pkgconfig/xkbregistry.pc
+    ```
+  - Después de esto, recién empieza el trabajo nuevo de verdad de Parte 3:
+    Qt6 (QtBase mínimo compilado sólo contra Wayland, sin X11/xcb) y, sobre
+    él, KDE Frameworks/kwin/plasma-workspace. Todavía no investigado en
+    profundidad — va a necesitar su propio research de opciones de build
+    antes de escribir nada, mismo criterio que se usó para Mesa.
 
 ## Infraestructura de build
 
+- **BUG REAL GRAVE encontrado y resuelto (2026-09-30): `/lfs/etc` nunca tuvo
+  volumen persistente — cualquier config real se perdía entre corridas
+  separadas de `podman-compose run --rm`.** Descubierto al retomar Fase 5
+  (confirmar `build-infra.sh` por primera vez): `step_apk_signing()` escribía
+  la llave pública + `repositories` en `${LFS_SYSROOT}/etc/apk/...`, el verify
+  de ESA MISMA corrida daba bien, pero un `find` real en un contenedor NUEVO
+  confirmó que `/lfs/etc` no existía en absoluto. Revisando
+  [`docker-compose.yml`](../docker-compose.yml): los únicos volúmenes
+  persistentes eran `linsios-tools:/lfs/tools`, `linsios-build:/lfs/build`,
+  `linsios-sysroot:/lfs/usr` y `linsios-boot:/lfs/boot` — `/lfs/etc` vivía en
+  el filesystem efímero del contenedor y se borraba en cada `--rm`. Mismo
+  patrón ya conocido ("el filesystem del contenedor `--rm` es efímero") pero
+  nunca antes detectado para `/etc` porque nadie había confirmado su
+  contenido en una corrida nueva hasta ahora.
+  - **Alcance real confirmado con `grep` sobre todos los scripts de fase:**
+    afectaba `build-comms.sh` (Fase 4 — PAM: `/etc/pam.d/*`,
+    `/etc/security/faillock.conf`; DNS-over-TLS: `/etc/systemd/resolved.conf`)
+    y varios pasos de Fase 6 Parte 1 cuyos propios `ninja install` depositan
+    configs reales en `/etc` (dbus: `/etc/dbus-1/{system,session}.conf`;
+    fontconfig: `/etc/fonts/fonts.conf` + 23 symlinks en `/etc/fonts/conf.d`;
+    pipewire: `/etc/security/limits.d/25-pw-rlimits.conf`; polkit:
+    `/etc/polkit-1/rules.d`) además de Fase 5 (`apk-signing`). Es decir: Fase
+    4 y Fase 6 Parte 1, ambas dadas por "✅ completas" hace semanas, nunca
+    habían dejado ese contenido persistido de verdad entre corridas
+    separadas.
+  - **Fix real:** agregado el volumen `linsios-etc:/lfs/etc` a
+    `docker-compose.yml` (mismo patrón que `linsios-sysroot`/`linsios-boot`).
+    Como los build-dirs de dbus/fontconfig/pipewire/polkit seguían intactos
+    en el volumen persistente `/lfs/build` (nunca se habían borrado), no hizo
+    falta recompilar nada — alcanzó con re-correr `pam-config`/
+    `network-config` (Fase 4, instantáneo, sólo escriben archivos) y
+    `DESTDIR=/lfs ninja -C <bdir> install` sobre los build-dirs ya existentes
+    de dbus/fontconfig/pipewire (Fase 6 Parte 1). `build-infra.sh all` (Fase
+    5) se re-corrió completo.
+  - **Confirmado en un contenedor NUEVO (la prueba real):** `find /lfs/etc
+    -type f` lista los 12 archivos esperados (apk/keys, apk/repositories,
+    dbus-1, fonts, pam.d×4, security×2, systemd/resolved.conf) + 23 symlinks
+    de fontconfig, y sobreviven a una corrida posterior.
+- **BUG REAL #2, encontrado reinstalando lo anterior: unidades systemd de
+  dbus/polkit/pipewire/wireplumber duplicaban el sysroot en la ruta
+  (`/lfs/lfs/usr/lib/systemd/...` en vez de `/lfs/usr/lib/systemd/...`).**
+  Confirmado que esto YA pasaba en los logs originales de Fase 6 Parte 1
+  (`logs/20260829-*.log`) — no es algo nuevo, viene de semanas atrás sin que
+  nadie lo notara (ningún verify de esas fases chequea contenido de unidades
+  systemd). **Causa raíz real:** `systemd.pc` define
+  `systemdsystemunitdir`/`systemduserunitdir` en relativo
+  (`${prefix}/lib/systemd/system` → `/usr/lib/systemd/system`, confirmado
+  leyendo el `.pc` real instalado). El problema es la combinación de DOS
+  mecanismos de apuntar al sysroot que no deberían mezclarse para esta
+  variable puntual: `PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}"` (necesario para
+  que OTRAS dependencias como glib resuelvan Cflags/Libs contra el sysroot)
+  ya reescribe esta variable custom a una ruta absoluta con el sysroot
+  adentro en tiempo de `meson setup` (queda horneada así en `build.ninja`), y
+  después `DESTDIR="${LFS_SYSROOT}" ninja install` vuelve a prepender el
+  sysroot sobre esa ruta YA absoluta — de ahí el doble.
+  - **Fix real por paquete** (los 4 confirman compilando limpio y con rutas
+    correctas en un contenedor nuevo):
+    - **dbus**: opción real `-Dsystemd_system_unitdir=`/
+      `-Dsystemd_user_unitdir=` (con guion bajo entre "systemd" y "system").
+      Un intento anterior (2026-08-27) había probado
+      `-Dsystemdsystemunitdir=` (SIN el primer guion bajo) y, al fallar con
+      "Unknown option", concluyó — incorrecto — que dbus no tenía ningún
+      override. Sí lo tiene, con otro nombre exacto.
+    - **polkit**: opción real `-Dsystemdsystemunitdir=` (sin ningún guion
+      bajo, a diferencia de dbus). Pero **`sysusers_dir`/`tmpfiles_dir` NO
+      tienen ninguna opción de override** (confirmado leyendo el
+      `meson_options.txt` real) — para esos dos archivos
+      (`polkit.conf`/`polkit-tmpfiles.conf`) no quedó otra que corregir la
+      ruta a mano con un `mv` post-install dentro de `step_polkit()`.
+    - **pipewire** y **wireplumber**: opción real
+      `-Dsystemd-system-unit-dir=`/`-Dsystemd-user-unit-dir=` (con guiones,
+      no guión bajo).
+  - Los 4 `step_*()` en `scripts/build-desktop.sh` quedaron actualizados con
+    la opción real correspondiente (+ el `mv` puntual en polkit), cada uno
+    documentado inline con la causa raíz real.
 - **Docker Desktop reemplazado por `podman-compose`** (2026-08-29) — Docker
   Desktop no arrancaba en tu máquina, así que se sacó la dependencia por
   completo. De acá en más usá `podman-compose` (con guion) para todo, no

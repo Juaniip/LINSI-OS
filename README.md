@@ -24,11 +24,11 @@ El desarrollo se divide en ocho fases, cada una responsable de una capa del sist
 | 7 | Contenerización | Flatpak, Podman/Distrobox |
 | 8 | ISO y distribución | Imagen SquashFS + instalador Calamares |
 
-Cada fase tiene su propio script en `scripts/` (`build-cross-toolchain.sh`, `build-kernel.sh`, `build-userspace.sh`, `build-security.sh`, `build-comms.sh`, `build-infra.sh`, `build-desktop.sh`, `build-mesa.sh`), autocontenido y sin depender de los demás. Cada script expone sus pasos por separado además de un modo `all` que corre la fase completa, y cada paso relevante termina con una verificación automática antes de pasar al siguiente.
+Cada fase tiene su propio script en `scripts/` (`build-cross-toolchain.sh`, `build-kernel.sh`, `build-userspace.sh`, `build-security.sh`, `build-comms.sh`, `build-infra.sh`, `build-desktop.sh`, `build-mesa.sh`, `build-kde.sh`), autocontenido y sin depender de los demás. Cada script expone sus pasos por separado además de un modo `all` que corre la fase completa, y cada paso relevante termina con una verificación automática antes de pasar al siguiente.
 
 ## Estado del desarrollo
 
-Fases 0 a 4 completas y verificadas. Dentro de la Fase 6, la Parte 1 (fundación no gráfica: D-Bus, Wayland, entrada, audio) está completa; la Parte 2 (Mesa + LLVM, drivers gráficos) está en curso. La Fase 5 está escrita pero todavía no tiene confirmación empírica de ejecución, y las Fases 6 Parte 3 (Qt6/KDE), 7 y 8 todavía no arrancaron. El detalle de cada corrección técnica real, con su causa raíz, queda documentado en [`docs/PENDIENTES.md`](docs/PENDIENTES.md) a medida que se resuelve.
+Fases 0 a 4 completas y verificadas. Dentro de la Fase 6, la Parte 1 (fundación no gráfica: D-Bus, Wayland, entrada, audio) y la Parte 2 (Mesa + LLVM, drivers gráficos para Intel/AMD/Nvidia) están completas y verificadas. La Parte 3 (Qt6 + KDE Frameworks/Plasma) está en desarrollo activo y bastante avanzada: Qt6 completo, KDE Frameworks 6 completo (incluidos los dos frameworks más grandes, KIO y knewstuff), y del "tren de Plasma" ya están `libplasma`, `PlasmaActivities` y `PlasmaActivitiesStats` compilados y verificados — falta el resto del tren de Plasma (KWayland, KSysGuard, KDecoration3, etc.) y después `kwin`/`plasma-workspace` en sí. La Fase 5 está escrita pero todavía no tiene confirmación empírica de ejecución, y las Fases 7 y 8 todavía no arrancaron. El detalle de cada corrección técnica real, con su causa raíz, queda documentado en [`docs/PENDIENTES.md`](docs/PENDIENTES.md) a medida que se resuelve.
 
 ## Cómo compilar
 
@@ -46,6 +46,7 @@ podman-compose run --rm builder scripts/build-security.sh all
 podman-compose run --rm builder scripts/build-comms.sh all
 podman-compose run --rm builder scripts/build-desktop.sh all
 podman-compose run --rm builder scripts/build-mesa.sh all
+podman-compose run --rm builder scripts/build-kde.sh all
 ```
 
 Cada corrida deja un log con marca temporal en `logs/`, que no se sube al repositorio pero queda disponible localmente para diagnosticar cualquier error de compilación.
