@@ -151,6 +151,21 @@ RUN find /etc/apt -type f \( -name 'sources.list' -o -name '*.sources' \) \
 #      leyendo el meson-log.txt real (Running command: python3 -c 'import
 #      yaml' -> ModuleNotFoundError). python3-yaml de Debian alcanza sin
 #      drama de versión, igual que mako.
+#   13) python3-lxml (agregado 2026-09-04 tras un error real de build, Fase
+#      6 Parte 3, BreezeIcons): "WITH_ICON_GENERATION" (ON por default en
+#      su CMakeLists.txt real) invoca tools/generate-24px-versions.py en
+#      tiempo de build para generar los íconos de 24px a partir de los SVG
+#      maestros -- ese script hace "from lxml import etree", y el módulo
+#      no estaba instalado. Mismo criterio que mako/yaml: agregar el
+#      paquete de apt en vez de apagar la opción (perder los íconos de
+#      24px sin necesidad real).
+#   14) xsltproc (agregado 2026-09-16 tras un error real de build, Fase 6
+#      Parte 3, NetworkManager -- dependencia de KF6NetworkManagerQt/
+#      plasma-workspace): "find_program('xsltproc')" sin
+#      "required: false" en su meson.build real, usado para transformar
+#      XML de D-Bus introspection/policykit -- "ERROR: Program
+#      'xsltproc' not found or not executable". No estaba en ninguna
+#      capa anterior porque ningún paquete previo lo había pedido.
 # ------------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -179,6 +194,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         glslang-tools \
         python3-mako \
         python3-yaml \
+        python3-lxml \
+        xsltproc \
     && rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -238,6 +255,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-jinja2 \
     && rm -rf /var/lib/apt/lists/* \
     && pip3 install --break-system-packages --no-cache-dir "meson>=1.3"
+
+# ------------------------------------------------------------------------------
+# cmake más nuevo por pip (Fase 6 Parte 3, 2026-09-04): extra-cmake-modules
+# (ECM, el módulo base de todo KDE Frameworks 6) exige "cmake_minimum_required
+# (VERSION 3.29)" -- el cmake de apt de más arriba (Debian bookworm) es 3.25.1,
+# no alcanza (confirmado en vivo: `cmake --version` adentro del contenedor).
+# Mismo criterio ya usado acá mismo para meson/Rust: no depender de qué tan
+# vieja sea la versión de apt, instalar la última real de PyPI. Se deja el
+# cmake de apt intacto (no rompe nada de lo que ya usa CMake -- LLVM/Mesa
+# corrieron bien con 3.25.1) -- el PATH ya prioriza /usr/local/bin (donde pip3
+# deja los shims) por sobre /usr/bin, mismo mecanismo ya documentado más abajo
+# para meson.
+RUN pip3 install --break-system-packages --no-cache-dir "cmake>=3.29"
 
 # ------------------------------------------------------------------------------
 # Usuario no privilegiado: el cross-toolchain y todo lo que compilemos NUNCA
