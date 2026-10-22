@@ -1,0 +1,11 @@
+# Todo esto se ejecuta o se lee dentro del contenedor Linux (o en la Pi):
+# con CRLF, bash rompe con "$'\r': command not found". Esta PC de Windows
+# tiene core.autocrlf=true, que sin esto los convertiría a CRLF al clonar.
+*.sh        text eol=lf
+*.config    text eol=lf
+*.patch     text eol=lf
+*.yml       text eol=lf
+Dockerfile  text eol=lf
+.dockerignore text eol=lf
+
+*.pdf       binary
