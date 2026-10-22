@@ -166,6 +166,15 @@ RUN find /etc/apt -type f \( -name 'sources.list' -o -name '*.sources' \) \
 #      XML de D-Bus introspection/policykit -- "ERROR: Program
 #      'xsltproc' not found or not executable". No estaba en ninguna
 #      capa anterior porque ningún paquete previo lo había pedido.
+#   15) libdbus-1-3 (agregado 2026-10-22 tras un error real de build, Fase 6
+#      Parte 3, plasma-desktop): la QtDBus NATIVA (la de qdbuscpp2xml en
+#      ${QT6_NATIVE_INSTALL}) carga libdbus-1.so.3 en runtime para calcular
+#      firmas de tipos compuestos registrados (QRectF -> "(dddd)", QSizeF,
+#      QList<uint>). Sin ella las devuelve VACÍAS sin avisar: el
+#      org.kde.kwin.InputDevice.xml que instaló kwin quedó con 7 propiedades
+#      type="" y el qdbusxml2cpp de plasma-desktop lo rechazó ("Invalid
+#      D-Bus type signature ''"). Sólo la librería de runtime, nativa del
+#      contenedor -- nada que ver con el dbus cruzado del sysroot.
 # ------------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -196,6 +205,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-yaml \
         python3-lxml \
         xsltproc \
+        libdbus-1-3 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
