@@ -1034,6 +1034,22 @@ sys_root = '${LFS_SYSROOT}'
 EOF
 }
 
+# "sys_root" hace que Meson setee PKG_CONFIG_SYSROOT_DIR, así que las
+# variables de pkg-config que un meson.build usa como install_dir
+# (polkit-gobject-1 "policydir", etc.) vuelven con el sysroot adentro y
+# DESTDIR lo prepende otra vez: el archivo cae en ${LFS_SYSROOT}${LFS_SYSROOT}
+# (/lfs/lfs, filesystem efímero del contenedor) y se pierde. Siempre que el
+# paquete tenga opción propia se usa esa (p. ej. -Dsystemdsystemunitdir=);
+# esto mueve lo que quede sin opción de override, y deja en el log qué movió.
+merge_doubled_sysroot() {
+    local doubled="${LFS_SYSROOT}${LFS_SYSROOT}"
+    [[ -d "${doubled}" ]] || return 0
+    log "Ruta duplicada ${doubled} -- moviendo al sysroot real:"
+    (cd "${doubled}" && find . -type f -o -type l) | sed 's#^\.#  #'
+    cp -a "${doubled}/." "${LFS_SYSROOT}/"
+    rm -rf "${doubled}"
+}
+
 # ------------------------------------------------------------------------------
 # Tier 2) IsoCodes -- prerequisito de ki18n. Paquete de datos puro (JSON/XML
 # de códigos ISO de idiomas/países/monedas), Meson, sin código C/C++ que
@@ -1251,6 +1267,10 @@ _kf6_cmake_build() {
 
     ninja -C "${bdir}" ${MAKEFLAGS}
     DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
+    # Red de seguridad (2026-10-22): varios paquetes de Plasma leen rutas de
+    # systemd con pkg_get_variable(), que con PKG_CONFIG_SYSROOT_DIR vuelve
+    # con el sysroot adentro -- ver merge_doubled_sysroot.
+    merge_doubled_sysroot
 
     log "${pkg} instalado en ${LFS_SYSROOT}/usr"
 }
@@ -1326,6 +1346,10 @@ _plasma_cmake_build() {
 
     ninja -C "${bdir}" ${MAKEFLAGS}
     DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
+    # Red de seguridad (2026-10-22): varios paquetes de Plasma leen rutas de
+    # systemd con pkg_get_variable(), que con PKG_CONFIG_SYSROOT_DIR vuelve
+    # con el sysroot adentro -- ver merge_doubled_sysroot.
+    merge_doubled_sysroot
 
     log "${pkg} instalado en ${LFS_SYSROOT}/usr"
 }
@@ -1434,6 +1458,38 @@ step_verify_kwidgetsaddons() { _kf6_verify_lib KWidgetsAddons libKF6WidgetsAddon
 require_isocodes() {
     [[ -e "${LFS_SYSROOT}/usr/share/pkgconfig/iso-codes.pc" ]] \
         || die "no está iso-codes en el sysroot -- corré primero: scripts/build-kde.sh isocodes"
+}
+# _replace_once <archivo> <viejo> <nuevo> -- reemplazo exacto que exige que
+# el ancla aparezca UNA sola vez (mismo criterio que patch_file de los
+# parches en Python de más abajo).
+_replace_once() {
+    python3 - "$1" "$2" "$3" <<'PYEOF'
+import sys
+path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
+content = open(path, encoding="utf-8").read()
+count = content.count(old)
+if count != 1:
+    sys.exit(f"ERROR: ancla de patch encontrada {count} veces (se esperaba 1) en {path}:\n{old!r}")
+open(path, "w", encoding="utf-8").write(content.replace(old, new))
+print(f"OK: {path} parcheado")
+PYEOF
+}
+
+# Bug real (2026-10-22, escaneo de .rodata de todos los ELF del sysroot):
+# libKF6I18nLocaleData tenía "/lfs/usr" compilado como ISO_CODES_PREFIX --
+# FindIsoCodes (ECM) toma IsoCodes_PREFIX de la variable "prefix" de
+# pkg-config, que con PKG_CONFIG_SYSROOT_DIR vuelve con el sysroot adentro.
+# En el sistema real buscaría los JSON de iso-codes en /lfs/usr/share y no
+# tendría nombres de países/regiones. Se le saca el prefijo del sysroot.
+_patch_ki18n() {
+    _replace_once "$1/CMakeLists.txt" \
+        "find_package(IsoCodes)
+" \
+        "find_package(IsoCodes)
+if (CMAKE_SYSROOT AND IsoCodes_PREFIX)
+    string(REGEX REPLACE \"^\${CMAKE_SYSROOT}\" \"\" IsoCodes_PREFIX \"\${IsoCodes_PREFIX}\")
+endif()
+"
 }
 step_ki18n() { require_isocodes; _kf6_cmake_build KI18n ki18n; }
 step_verify_ki18n() { _kf6_verify_lib KI18n libKF6I18n.so; }
@@ -1883,6 +1939,12 @@ step_libcanberra() {
     mkdir -p "${bdir}"
     cd "${bdir}"
 
+    # --with-systemdsystemunitdir (2026-10-22): sin esto configure toma la
+    # ruta de systemd.pc, que con PKG_CONFIG_SYSROOT_DIR ya viene con el
+    # sysroot adentro, y DESTDIR lo vuelve a prepender -- los .service
+    # caían en /lfs/lfs/... (filesystem efímero del contenedor) y se
+    # perdían. Mismo bug que dbus/polkit/pipewire/wireplumber, ver
+    # docs/PENDIENTES.md ("Infraestructura de build").
     PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig:${LFS_SYSROOT}/usr/share/pkgconfig" \
     PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
     ../configure \
@@ -1897,7 +1959,8 @@ step_libcanberra() {
         --disable-gtk \
         --disable-gtk3 \
         --disable-lynx \
-        --disable-tdb
+        --disable-tdb \
+        --with-systemdsystemunitdir=/usr/lib/systemd/system
 
     make ${MAKEFLAGS}
     make DESTDIR="${LFS_SYSROOT}" install
@@ -1912,7 +1975,8 @@ step_verify_libcanberra() {
     local p
     for p in \
         "${LFS_SYSROOT}/usr/lib/libcanberra.so" \
-        "${LFS_SYSROOT}/usr/lib/pkgconfig/libcanberra.pc"
+        "${LFS_SYSROOT}/usr/lib/pkgconfig/libcanberra.pc" \
+        "${LFS_SYSROOT}/usr/lib/systemd/system/canberra-system-bootup.service"
     do
         if [[ -e "${p}" ]]; then echo "  [OK] ${p}"; else echo "  [FALTA] ${p}"; ok=0; fi
     done
@@ -2408,6 +2472,95 @@ step_verify_libxcb() {
     done
     [[ "${ok}" -eq 1 ]] || die "falta algo de libxcb"
     log "OK: libxcb completo en el sysroot."
+}
+
+# ------------------------------------------------------------------------------
+# xcb-util + xcb-util-image -- plasma-desktop 6.7.4 pide
+# "find_package(XCB REQUIRED COMPONENTS XCB SHM IMAGE)"; XCB y SHM ya los
+# da libxcb, IMAGE sale de xcb-util-image (que depende de xcb-util). Sólo
+# librerías sobre el protocolo xcb, mismo criterio que libxcb: nada de Xlib,
+# servidor X ni XWayland. (2026-10-22: se llegó a compilar libX11 +
+# libxkbfile para el KCM de teclado, pero ese KCM además exige Qt6 con
+# plataforma xcb y KWindowSystem con X11 -- se descartó y se sacaron del
+# sysroot; ver docs/PENDIENTES.md, "Escritorio usable".)
+# ------------------------------------------------------------------------------
+
+step_xcb_util() {
+    require_toolchain
+    log "xcb-util ${XCB_UTIL_VERSION} para ${LFS_TGT} — Autotools"
+
+    cd "${LFS_SOURCES}"
+    fetch "${XCB_MIRROR}/xcb-util-${XCB_UTIL_VERSION}.tar.xz" \
+          "xcb-util-${XCB_UTIL_VERSION}.tar.xz"
+    log_sha256 "${LFS_SOURCES}/xcb-util-${XCB_UTIL_VERSION}.tar.xz"
+    extract_once "${LFS_SOURCES}/xcb-util-${XCB_UTIL_VERSION}.tar.xz" \
+                 "${LFS_BUILD}/.extracted-xcb-util-${XCB_UTIL_VERSION}"
+
+    local src="${LFS_BUILD}/xcb-util-${XCB_UTIL_VERSION}"
+    local bdir="${src}/build"
+    mkdir -p "${bdir}"
+    cd "${bdir}"
+
+    PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig:${LFS_SYSROOT}/usr/share/pkgconfig" \
+    PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
+    ../configure \
+        --host="${LFS_TGT}" \
+        --build="$(build_triplet)" \
+        --prefix=/usr \
+        --disable-static
+
+    make ${MAKEFLAGS}
+    make DESTDIR="${LFS_SYSROOT}" install
+    find "${LFS_SYSROOT}/usr/lib" -maxdepth 1 -name 'libxcb-util*.la' -delete 2>/dev/null || true
+
+    log "xcb-util instalado en ${LFS_SYSROOT}/usr"
+}
+step_verify_xcb_util() {
+    log "Verificación: libxcb-util.so en el sysroot"
+    local p="${LFS_SYSROOT}/usr/lib/libxcb-util.so"
+    [[ -e "${p}" ]] || die "no está ${p}"
+    echo "  [OK] ${p}"
+    log "OK: xcb-util completo en el sysroot."
+}
+
+step_xcb_util_image() {
+    require_toolchain
+    log "xcb-util-image ${XCB_UTIL_IMAGE_VERSION} para ${LFS_TGT} — Autotools"
+
+    cd "${LFS_SOURCES}"
+    fetch "${XCB_MIRROR}/xcb-util-image-${XCB_UTIL_IMAGE_VERSION}.tar.xz" \
+          "xcb-util-image-${XCB_UTIL_IMAGE_VERSION}.tar.xz"
+    log_sha256 "${LFS_SOURCES}/xcb-util-image-${XCB_UTIL_IMAGE_VERSION}.tar.xz"
+    extract_once "${LFS_SOURCES}/xcb-util-image-${XCB_UTIL_IMAGE_VERSION}.tar.xz" \
+                 "${LFS_BUILD}/.extracted-xcb-util-image-${XCB_UTIL_IMAGE_VERSION}"
+
+    local src="${LFS_BUILD}/xcb-util-image-${XCB_UTIL_IMAGE_VERSION}"
+    local bdir="${src}/build"
+    mkdir -p "${bdir}"
+    cd "${bdir}"
+
+    PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig:${LFS_SYSROOT}/usr/share/pkgconfig" \
+    PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
+    ../configure \
+        --host="${LFS_TGT}" \
+        --build="$(build_triplet)" \
+        --prefix=/usr \
+        --disable-static
+
+    make ${MAKEFLAGS}
+    make DESTDIR="${LFS_SYSROOT}" install
+    find "${LFS_SYSROOT}/usr/lib" -maxdepth 1 -name 'libxcb-image*.la' -delete 2>/dev/null || true
+
+    log "xcb-util-image instalado en ${LFS_SYSROOT}/usr"
+}
+step_verify_xcb_util_image() {
+    log "Verificación: libxcb-image.so + xcb-image.pc en el sysroot"
+    local ok=1 p
+    for p in "${LFS_SYSROOT}/usr/lib/libxcb-image.so" "${LFS_SYSROOT}/usr/lib/pkgconfig/xcb-image.pc"; do
+        if [[ -e "${p}" ]]; then echo "  [OK] ${p}"; else echo "  [FALTA] ${p}"; ok=0; fi
+    done
+    [[ "${ok}" -eq 1 ]] || die "falta algo de xcb-util-image"
+    log "OK: xcb-util-image completo en el sysroot."
 }
 
 # libplasma -- la pieza central de Tier 3. Dependencias reales confirmadas
@@ -4721,6 +4874,17 @@ step_verify_libqrencode() {
     log "OK: libqrencode completo en el sysroot."
 }
 
+# Bug real (2026-10-22, escaneo de .rodata): kded6 tenía compilado
+# "/lfs/usr/lib/libexec/kf6/kconf_update" -- su src/CMakeLists.txt define
+# KCONF_UPDATE_EXE con "$<TARGET_FILE:KF6::kconf_update>", que en un build
+# cruzado es la ruta absoluta del target importado DESDE el sysroot. En el
+# sistema real kded nunca encontraría kconf_update (las migraciones de
+# configuración de usuario no correrían). Se usa la ruta de instalación.
+_patch_kded() {
+    _replace_once "$1/src/CMakeLists.txt" \
+        'KCONF_UPDATE_EXE="$<TARGET_FILE:KF6::kconf_update>"' \
+        'KCONF_UPDATE_EXE="${KDE_INSTALL_FULL_LIBEXECDIR_KF}/kconf_update"'
+}
 step_kded()    { _kf6_cmake_build KDED kded; }
 # KDED no instala ninguna librería -- sólo el daemon real
 # (confirmado por el log de instalación: "kded6", sin ningún .so).
@@ -5001,6 +5165,57 @@ require_libndp() {
 # sólo hace falta "libnm" (la librería cliente) para que
 # KF6NetworkManagerQt compile, no un daemon de red del sistema
 # funcionando de verdad.
+# install_polkit_its_rules -- bug real (NetworkManager, 2026-09-16; lo
+# reusa ModemManager): "msgfmt: cannot locate ITS rules for
+# data/org.freedesktop.NetworkManager.policy.in" al mergear traducciones del
+# archivo de polkit (msgfmt --xml necesita un ".loc"/".its" real para saber
+# qué elementos del XML son traducibles). El contenedor tiene los its/loc
+# de gettext para otros esquemas (glade/gsettings/metainfo, confirmado con
+# "dpkg -L gettext-base") pero NINGUNO para el esquema de PolicyKit -- no es
+# parte del paquete "gettext" de Debian, normalmente lo trae
+# polkit/libpolkit-gobject-1-dev, que no existe para bookworm.
+#
+# Dos intentos fallidos antes de este: (1) apuntar "GETTEXTDATADIRS" a un
+# directorio propio -- msgfmt de este gettext (0.21) nunca lo leyó de
+# verdad para resolver its/loc (se confirmó comparando "con" y "sin" la
+# variable seteada: daba exactamente el mismo resultado en ambos casos).
+# (2) copiar el ".loc"/".its" directo a "/usr/share/gettext-0.21/its/" (el
+# directorio real confirmado con "dpkg -L gettext-base") pero con
+# pattern="*.policy.in" -- seguía sin encontrarlo. Comparando contra
+# "metainfo.loc" real (pattern="*.metainfo.xml", SIN ".in" al final,
+# aunque el template real es "*.metainfo.xml.in") se confirmó que msgfmt
+# matchea el pattern CONTRA EL NOMBRE YA SIN EL ".in" final -- variante
+# real que funcionó: "pattern=\"*.policy\"".
+#
+# Fix real: copiar el ".loc"/".its" (mismo formato exacto que
+# "metainfo.loc"/"metainfo.its" ya instalados, confirmado leyéndolos
+# directo -- no adivinado) para el esquema real de PolicyKit
+# ("<policyconfig>", con "action/description" y "action/message" como
+# únicos textos traducibles) directo al directorio real de gettext --
+# alcanza con que dure sólo esta invocación del contenedor (todo pasa en el
+# mismo proceso que el build real, no hace falta que sobreviva a un "--rm"
+# posterior).
+install_polkit_its_rules() {
+    sudo -n tee /usr/share/gettext-0.21/its/polkit-policy.loc > /dev/null <<'EOF'
+<?xml version="1.0"?>
+<locatingRules>
+  <locatingRule name="PolicyKit Policy" pattern="*.policy">
+    <documentRule localName="policyconfig" target="polkit-policy.its"/>
+  </locatingRule>
+</locatingRules>
+EOF
+    sudo -n tee /usr/share/gettext-0.21/its/polkit-policy.its > /dev/null <<'EOF'
+<?xml version="1.0"?>
+<its:rules xmlns:its="http://www.w3.org/2005/11/its" version="2.0">
+  <its:translateRule selector="/policyconfig" translate="no"/>
+  <its:translateRule selector="/policyconfig/vendor |
+                               /policyconfig/action/description |
+                               /policyconfig/action/message"
+                     translate="yes"/>
+</its:rules>
+EOF
+}
+
 step_networkmanager() {
     require_toolchain
     require_libndp
@@ -5022,55 +5237,7 @@ step_networkmanager() {
     local bdir="${src}/build"
     rm -rf "${bdir}"
 
-    # GETTEXTDATADIRS -- bug real: "msgfmt: cannot locate ITS rules for
-    # data/org.freedesktop.NetworkManager.policy.in" al mergear
-    # traducciones del archivo de polkit (msgfmt --xml necesita un
-    # ".loc"/".its" real para saber qué elementos del XML son
-    # traducibles). El contenedor tiene los its/loc de gettext para
-    # otros esquemas (glade/gsettings/metainfo, confirmado con "dpkg -L
-    # gettext-base") pero NINGUNO para el esquema de PolicyKit -- no es
-    # parte del paquete "gettext" de Debian, normalmente lo trae
-    # polkit/libpolkit-gobject-1-dev, que no existe para bookworm.
-    #
-    # Dos intentos fallidos antes de este: (1) apuntar
-    # "GETTEXTDATADIRS" a un directorio propio -- msgfmt de este
-    # gettext (0.21) nunca lo leyó de verdad para resolver its/loc (se
-    # confirmó comparando "con" y "sin" la variable seteada: daba
-    # exactamente el mismo resultado en ambos casos). (2) copiar el
-    # ".loc"/".its" directo a "/usr/share/gettext-0.21/its/" (el
-    # directorio real confirmado con "dpkg -L gettext-base") pero con
-    # pattern="*.policy.in" -- seguía sin encontrarlo. Comparando contra
-    # "metainfo.loc" real (pattern="*.metainfo.xml", SIN ".in" al
-    # final, aunque el template real es "*.metainfo.xml.in") se
-    # confirmó que msgfmt matchea el pattern CONTRA EL NOMBRE YA SIN EL
-    # ".in" final -- variante real que funcionó: "pattern=\"*.policy\"".
-    #
-    # Fix real: copiar el ".loc"/".its" (mismo formato exacto que
-    # "metainfo.loc"/"metainfo.its" ya instalados, confirmado
-    # leyéndolos directo -- no adivinado) para el esquema real de
-    # PolicyKit ("<policyconfig>", con "action/description" y
-    # "action/message" como únicos textos traducibles) directo al
-    # directorio real de gettext -- alcanza con que dure sólo esta
-    # invocación del contenedor (todo pasa en el mismo proceso que el
-    # build real, no hace falta que sobreviva a un "--rm" posterior).
-    sudo -n tee /usr/share/gettext-0.21/its/polkit-policy.loc > /dev/null <<'EOF'
-<?xml version="1.0"?>
-<locatingRules>
-  <locatingRule name="PolicyKit Policy" pattern="*.policy">
-    <documentRule localName="policyconfig" target="polkit-policy.its"/>
-  </locatingRule>
-</locatingRules>
-EOF
-    sudo -n tee /usr/share/gettext-0.21/its/polkit-policy.its > /dev/null <<'EOF'
-<?xml version="1.0"?>
-<its:rules xmlns:its="http://www.w3.org/2005/11/its" version="2.0">
-  <its:translateRule selector="/policyconfig" translate="no"/>
-  <its:translateRule selector="/policyconfig/vendor |
-                               /policyconfig/action/description |
-                               /policyconfig/action/message"
-                     translate="yes"/>
-</its:rules>
-EOF
+    install_polkit_its_rules
 
     meson setup "${bdir}" \
         --cross-file="${crossfile}" \
@@ -5090,14 +5257,32 @@ EOF
         -Dcrypto=null \
         -Dlibpsl=false \
         -Dconcheck=false \
-        -Dnmcli=false
+        -Dnmcli=false \
+        -Dsystemdsystemunitdir=/usr/lib/systemd/system
 
     ninja -C "${bdir}" ${MAKEFLAGS}
     DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
+    # Bug real (2026-10-22, encontrado revisando logs viejos): las 4
+    # unidades systemd y la política de polkit caían en /lfs/lfs y se
+    # perdían. Las unidades se arreglan con -Dsystemdsystemunitdir de
+    # arriba; "policydir" (meson.build línea 506) no tiene opción de
+    # override, así que lo corrige merge_doubled_sysroot.
+    merge_doubled_sysroot
 
     log "NetworkManager (libnm) instalado en ${LFS_SYSROOT}/usr"
 }
-step_verify_networkmanager() { _kf6_verify_lib NetworkManager libnm.so; }
+step_verify_networkmanager() {
+    log "Verificación: libnm + unidad systemd + política polkit de NetworkManager"
+    local ok=1 p
+    for p in "${LFS_SYSROOT}/usr/lib/libnm.so" \
+             "${LFS_SYSROOT}/usr/lib/systemd/system/NetworkManager.service" \
+             "${LFS_SYSROOT}/usr/share/polkit-1/actions/org.freedesktop.NetworkManager.policy"; do
+        if [[ -e "${p}" ]]; then echo "  [OK] ${p}"; else echo "  [FALTA] ${p}"; ok=0; fi
+    done
+    [[ -e "${LFS_SYSROOT}${LFS_SYSROOT}" ]] && { echo "  [MAL] quedó ${LFS_SYSROOT}${LFS_SYSROOT}"; ok=0; }
+    [[ "${ok}" -eq 1 ]] || die "falta algo de NetworkManager en el sysroot"
+    log "OK: NetworkManager completo en el sysroot."
+}
 require_networkmanager() {
     [[ -e "${LFS_SYSROOT}/usr/lib/libnm.so" ]] \
         || die "no está libnm en el sysroot -- corré primero: scripts/build-kde.sh networkmanager"
@@ -5965,6 +6150,862 @@ step_verify_plasma_workspace() {
     log "OK: plasmashell, krunner, plasma_session, startplasma-wayland, ksmserver-logout-greeter"
 }
 
+# ==============================================================================
+# Escritorio usable (2026-10-22) -- lo que va por encima de plasma-workspace:
+# plasma-desktop, login manager, systemsettings, applets de red/audio, etc.
+# Research completo contra los CMakeLists.txt reales de Plasma 6.7.4 / KF
+# 6.29.0 en docs/PENDIENTES.md ("Escritorio usable").
+# ==============================================================================
+
+# knotifyconfig -- lo pide plasma-desktop (KF6 NotifyConfig, REQUIRED).
+# Deps reales: KF6 Completion/Config/I18n/KIO + Qt6Multimedia + Canberra
+# (opcional) -- todo ya en el sysroot.
+step_knotifyconfig()        { _kf6_cmake_build KF6NotifyConfig knotifyconfig; }
+step_verify_knotifyconfig() { _kf6_verify_lib KF6NotifyConfig libKF6NotifyConfig.so; }
+
+# kunitconversion -- lo pide plasma5support (REQUIRED). Sólo KF6I18n + Qt6
+# Core/Network; los bindings de Python (Shiboken6/PySide6) ya los apaga
+# _kf6_cmake_build con -DBUILD_PYTHON_BINDINGS=OFF.
+step_kunitconversion()        { _kf6_cmake_build KF6UnitConversion kunitconversion; }
+step_verify_kunitconversion() { _kf6_verify_lib KF6UnitConversion libKF6UnitConversion.so; }
+
+# qqc2-desktop-style -- estilo QtQuick Controls que usan systemsettings y
+# los KCMs QML (plasma-desktop lo declara RUNTIME). KF6 Config +
+# KirigamiPlatform; IconThemes/ColorScheme opcionales pero presentes. Su
+# find_package(X11) es opcional (no hay libX11 en el sysroot).
+step_qqc2_desktop_style() { _kf6_cmake_build KF6QQC2DesktopStyle qqc2-desktop-style; }
+step_verify_qqc2_desktop_style() {
+    log "Verificación: estilo org.kde.desktop de qqc2-desktop-style en el sysroot"
+    local p
+    p="$(find "${LFS_SYSROOT}/usr/lib" -path '*kirigami/platform*' -name '*desktop*.so' -print -quit 2>/dev/null)"
+    [[ -n "${p}" ]] || die "no se encontró el plugin de plataforma Kirigami de qqc2-desktop-style"
+    echo "  [OK] ${p}"
+    log "OK: qqc2-desktop-style completo en el sysroot."
+}
+
+# libsndfile -- pulseaudio la pide sin condición (dependency('sndfile') en la
+# línea 615 de su meson.build real, fuera de cualquier if, aunque sólo se
+# compile el cliente). BUILD_SHARED_LIBS viene OFF por default en su
+# CMakeLists.txt real. Sin códecs externos (FLAC/Vorbis/Opus/MPEG): nadie
+# del escritorio decodifica audio a través de libsndfile (los sonidos de
+# tema los reproduce libcanberra, que usa libvorbis directo).
+step_libsndfile() {
+    require_toolchain
+    log "libsndfile ${LIBSNDFILE_VERSION} para ${LFS_TGT} — CMake"
+
+    cd "${LFS_SOURCES}"
+    fetch "${LIBSNDFILE_MIRROR}/libsndfile-${LIBSNDFILE_VERSION}.tar.xz" \
+          "libsndfile-${LIBSNDFILE_VERSION}.tar.xz"
+    log_sha256 "${LFS_SOURCES}/libsndfile-${LIBSNDFILE_VERSION}.tar.xz"
+    extract_once "${LFS_SOURCES}/libsndfile-${LIBSNDFILE_VERSION}.tar.xz" \
+                 "${LFS_BUILD}/.extracted-libsndfile-${LIBSNDFILE_VERSION}"
+
+    local src="${LFS_BUILD}/libsndfile-${LIBSNDFILE_VERSION}"
+    local toolchain="${LFS_BUILD}/cmake-cross-linsi.cmake"
+    write_cmake_toolchain "${toolchain}"
+
+    local bdir="${src}/build"
+    rm -rf "${bdir}"
+
+    # -DCMAKE_POLICY_VERSION_MINIMUM=3.5: error real en el primer intento
+    # ("Compatibility with CMake < 3.5 has been removed from CMake", línea 1
+    # del CMakeLists.txt de 1.2.2) -- mismo caso y mismo fix que libqrencode.
+    cmake -S "${src}" -B "${bdir}" -G Ninja \
+        -DCMAKE_TOOLCHAIN_FILE="${toolchain}" \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=ON \
+        -DENABLE_EXTERNAL_LIBS=OFF \
+        -DENABLE_MPEG=OFF \
+        -DBUILD_PROGRAMS=OFF \
+        -DBUILD_EXAMPLES=OFF \
+        -DBUILD_TESTING=OFF \
+        -DENABLE_CPACK=OFF
+
+    ninja -C "${bdir}" ${MAKEFLAGS}
+    DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
+
+    log "libsndfile instalado en ${LFS_SYSROOT}/usr"
+}
+step_verify_libsndfile() {
+    log "Verificación: libsndfile.so + sndfile.pc en el sysroot"
+    local ok=1 p
+    for p in "${LFS_SYSROOT}/usr/lib/libsndfile.so" "${LFS_SYSROOT}/usr/lib/pkgconfig/sndfile.pc"; do
+        if [[ -e "${p}" ]]; then echo "  [OK] ${p}"; else echo "  [FALTA] ${p}"; ok=0; fi
+    done
+    [[ "${ok}" -eq 1 ]] || die "falta algo de libsndfile"
+    log "OK: libsndfile completo en el sysroot."
+}
+
+# libpulse -- SÓLO la librería cliente de PulseAudio (decisión con Juani,
+# 2026-10-22): -Ddaemon=false, nada de servidor. plasma-pa pide libpulse +
+# libpulse-mainloop-glib (esta última sólo sale con -Dglib=enabled). Todas
+# las demás features se apagan explícito (son "auto" en el
+# meson_options.txt real y se colarían solas si encontraran algo). Las
+# completions de bash/zsh van en "no": su ruta por default sale de
+# pkg-config y caería duplicada en /lfs/lfs (ver merge_doubled_sysroot).
+step_libpulse() {
+    require_toolchain
+    [[ -e "${LFS_SYSROOT}/usr/lib/libsndfile.so" ]] \
+        || die "falta libsndfile -- corré primero: scripts/build-kde.sh libsndfile"
+    log "PulseAudio ${PULSEAUDIO_VERSION} (sólo cliente) para ${LFS_TGT} — Meson+Ninja"
+
+    cd "${LFS_SOURCES}"
+    fetch "${PULSEAUDIO_MIRROR}/pulseaudio-${PULSEAUDIO_VERSION}.tar.xz" \
+          "pulseaudio-${PULSEAUDIO_VERSION}.tar.xz"
+    log_sha256 "${LFS_SOURCES}/pulseaudio-${PULSEAUDIO_VERSION}.tar.xz"
+    extract_once "${LFS_SOURCES}/pulseaudio-${PULSEAUDIO_VERSION}.tar.xz" \
+                 "${LFS_BUILD}/.extracted-pulseaudio-${PULSEAUDIO_VERSION}"
+
+    local src="${LFS_BUILD}/pulseaudio-${PULSEAUDIO_VERSION}"
+    cd "${src}"
+
+    local crossfile="${LFS_BUILD}/meson-cross-linsi.ini"
+    write_meson_crossfile "${crossfile}"
+
+    local bdir="${src}/build"
+    rm -rf "${bdir}"
+
+    meson setup "${bdir}" \
+        --cross-file="${crossfile}" \
+        --prefix=/usr \
+        --libdir=lib \
+        --sysconfdir=/etc \
+        --buildtype=release \
+        -Ddaemon=false \
+        -Dclient=true \
+        -Ddoxygen=false \
+        -Dman=false \
+        -Dtests=false \
+        -Dglib=enabled \
+        -Dx11=disabled \
+        -Dalsa=disabled \
+        -Dasyncns=disabled \
+        -Davahi=disabled \
+        -Dbluez5=disabled \
+        -Dbluez5-gstreamer=disabled \
+        -Dconsolekit=disabled \
+        -Ddbus=disabled \
+        -Delogind=disabled \
+        -Dfftw=disabled \
+        -Dgsettings=disabled \
+        -Dgstreamer=disabled \
+        -Dgtk=disabled \
+        -Djack=disabled \
+        -Dlirc=disabled \
+        -Dopenssl=disabled \
+        -Dorc=disabled \
+        -Doss-output=disabled \
+        -Dsoxr=disabled \
+        -Dspeex=disabled \
+        -Dsystemd=disabled \
+        -Dtcpwrap=disabled \
+        -Dudev=disabled \
+        -Dvalgrind=disabled \
+        -Dwebrtc-aec=disabled \
+        -Dbashcompletiondir=no \
+        -Dzshcompletiondir=no
+
+    ninja -C "${bdir}" ${MAKEFLAGS}
+    DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
+    merge_doubled_sysroot
+
+    log "libpulse instalado en ${LFS_SYSROOT}/usr"
+}
+step_verify_libpulse() {
+    log "Verificación: libpulse + libpulse-mainloop-glib, y SIN daemon"
+    local ok=1 p
+    for p in "${LFS_SYSROOT}/usr/lib/libpulse.so" "${LFS_SYSROOT}/usr/lib/libpulse-mainloop-glib.so" \
+             "${LFS_SYSROOT}/usr/lib/pkgconfig/libpulse-mainloop-glib.pc"; do
+        if [[ -e "${p}" ]]; then echo "  [OK] ${p}"; else echo "  [FALTA] ${p}"; ok=0; fi
+    done
+    if [[ -e "${LFS_SYSROOT}/usr/bin/pulseaudio" ]]; then
+        echo "  [MAL] se instaló el daemon ${LFS_SYSROOT}/usr/bin/pulseaudio"; ok=0
+    fi
+    [[ "${ok}" -eq 1 ]] || die "libpulse no quedó como se esperaba"
+    log "OK: libpulse (sólo cliente) completo en el sysroot."
+}
+
+# pulseaudio-qt -- KF6PulseAudioQt, lo pide plasma-pa (>= 1.6.0). ECM + Qt6
+# Core/Gui/DBus + libpulse/libpulse-mainloop-glib. Proyecto aparte de KF6
+# (download.kde.org/stable/pulseaudio-qt/, sin carpeta de versión), pero
+# mismo esquema CMake+ECM que _kf6_cmake_build.
+step_pulseaudio_qt() {
+    require_toolchain
+    require_ecm
+    [[ -e "${LFS_SYSROOT}/usr/lib/libpulse-mainloop-glib.so" ]] \
+        || die "falta libpulse -- corré primero: scripts/build-kde.sh libpulse"
+    log "pulseaudio-qt ${PULSEAUDIO_QT_VERSION} para ${LFS_TGT} — CMake+ECM"
+
+    cd "${LFS_SOURCES}"
+    fetch "${PULSEAUDIO_QT_MIRROR}/pulseaudio-qt-${PULSEAUDIO_QT_VERSION}.tar.xz" \
+          "pulseaudio-qt-${PULSEAUDIO_QT_VERSION}.tar.xz"
+    log_sha256 "${LFS_SOURCES}/pulseaudio-qt-${PULSEAUDIO_QT_VERSION}.tar.xz"
+    extract_once "${LFS_SOURCES}/pulseaudio-qt-${PULSEAUDIO_QT_VERSION}.tar.xz" \
+                 "${LFS_BUILD}/.extracted-pulseaudio-qt-${PULSEAUDIO_QT_VERSION}"
+
+    local src="${LFS_BUILD}/pulseaudio-qt-${PULSEAUDIO_QT_VERSION}"
+    local toolchain="${LFS_BUILD}/cmake-cross-linsi.cmake"
+    write_cmake_toolchain "${toolchain}"
+
+    local bdir="${src}/build"
+    rm -rf "${bdir}"
+
+    PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig:${LFS_SYSROOT}/usr/share/pkgconfig" \
+    PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
+    cmake -S "${src}" -B "${bdir}" -G Ninja \
+        -DCMAKE_TOOLCHAIN_FILE="${toolchain}" \
+        -DQT_HOST_PATH="${QT6_NATIVE_INSTALL}" \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_TESTING=OFF \
+        -DBUILD_QCH=OFF
+
+    ninja -C "${bdir}" ${MAKEFLAGS}
+    DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
+
+    log "pulseaudio-qt instalado en ${LFS_SYSROOT}/usr"
+}
+step_verify_pulseaudio_qt() { _kf6_verify_lib KF6PulseAudioQt libKF6PulseAudioQt.so; }
+
+# qtkeychain -- Qt6Keychain >= 0.16.0, lo pide plasma-nm (guarda secretos de
+# las conexiones). Qt6 por default desde 0.14 (BUILD_WITH_QT5=OFF).
+# LIBSECRET_SUPPORT=ON por default y con "pkg_check_modules(LIBSECRET
+# REQUIRED libsecret-1)" -- la libsecret de plasma-workspace ya está.
+step_qtkeychain() {
+    require_toolchain
+    require_libsecret
+    log "qtkeychain ${QTKEYCHAIN_VERSION} para ${LFS_TGT} — CMake"
+
+    cd "${LFS_SOURCES}"
+    fetch "${QTKEYCHAIN_MIRROR}/${QTKEYCHAIN_VERSION}.tar.gz" \
+          "qtkeychain-${QTKEYCHAIN_VERSION}.tar.gz"
+    log_sha256 "${LFS_SOURCES}/qtkeychain-${QTKEYCHAIN_VERSION}.tar.gz"
+    extract_once "${LFS_SOURCES}/qtkeychain-${QTKEYCHAIN_VERSION}.tar.gz" \
+                 "${LFS_BUILD}/.extracted-qtkeychain-${QTKEYCHAIN_VERSION}"
+
+    local src="${LFS_BUILD}/qtkeychain-${QTKEYCHAIN_VERSION}"
+    local toolchain="${LFS_BUILD}/cmake-cross-linsi.cmake"
+    write_cmake_toolchain "${toolchain}"
+
+    local bdir="${src}/build"
+    rm -rf "${bdir}"
+
+    PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig:${LFS_SYSROOT}/usr/share/pkgconfig" \
+    PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
+    cmake -S "${src}" -B "${bdir}" -G Ninja \
+        -DCMAKE_TOOLCHAIN_FILE="${toolchain}" \
+        -DQT_HOST_PATH="${QT6_NATIVE_INSTALL}" \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_WITH_QT5=OFF \
+        -DBUILD_TEST_APPLICATION=OFF \
+        -DBUILD_TESTING=OFF
+
+    ninja -C "${bdir}" ${MAKEFLAGS}
+    DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
+
+    log "qtkeychain instalado en ${LFS_SYSROOT}/usr"
+}
+step_verify_qtkeychain() { _kf6_verify_lib Qt6Keychain libqt6keychain.so; }
+
+# ModemManager -- versión MÍNIMA (decisión con Juani, 2026-10-22): plasma-nm
+# pide ModemManagerQt sin condición, y ModemManagerQt pide los headers/.pc de
+# ModemManager. Dependencias incondicionales reales (meson.build):
+# gio-unix-2.0, glib-2.0, gmodule-2.0, dbus-1 -- todas ya en el sysroot.
+# -Dudev=false: con udev pide libgudev (>= 232), que no está; consecuencia:
+# el daemon no detecta módems por hotplug (en el laboratorio no hay). Con
+# udev apagado, meson.build (línea 199) exige "udevdir" explícito igual --
+# error real en el primer intento ("Assert failed: udevdir must be
+# explicitly given if udev support is disabled"); ahí van sus reglas. Sin
+# MBIM/QMI/QRTR (pedirían libmbim/libqmi/libqrtr). Unidad systemd y policy
+# de D-Bus con ruta explícita (bug del doble sysroot); la policy de polkit
+# no tiene opción, la corrige merge_doubled_sysroot.
+step_modemmanager() {
+    require_toolchain
+    log "ModemManager ${MODEMMANAGER_VERSION} (mínimo) para ${LFS_TGT} — Meson+Ninja"
+
+    cd "${LFS_SOURCES}"
+    fetch "${MODEMMANAGER_MIRROR}/ModemManager-${MODEMMANAGER_VERSION}.tar.gz" \
+          "ModemManager-${MODEMMANAGER_VERSION}.tar.gz"
+    log_sha256 "${LFS_SOURCES}/ModemManager-${MODEMMANAGER_VERSION}.tar.gz"
+    extract_once "${LFS_SOURCES}/ModemManager-${MODEMMANAGER_VERSION}.tar.gz" \
+                 "${LFS_BUILD}/.extracted-ModemManager-${MODEMMANAGER_VERSION}"
+
+    local src="${LFS_BUILD}/ModemManager-${MODEMMANAGER_VERSION}"
+    cd "${src}"
+
+    local crossfile="${LFS_BUILD}/meson-cross-linsi.ini"
+    write_meson_crossfile "${crossfile}"
+
+    local bdir="${src}/build"
+    rm -rf "${bdir}"
+
+    install_polkit_its_rules
+
+    meson setup "${bdir}" \
+        --cross-file="${crossfile}" \
+        --prefix=/usr \
+        --libdir=lib \
+        --sysconfdir=/etc \
+        --localstatedir=/var \
+        --buildtype=release \
+        -Dudev=false \
+        -Dudevdir=/usr/lib/udev \
+        -Dmbim=false \
+        -Dqmi=false \
+        -Dqrtr=false \
+        -Dexamples=false \
+        -Dtests=false \
+        -Dintrospection=false \
+        -Dvapi=false \
+        -Dman=false \
+        -Dgtk_doc=false \
+        -Dbash_completion=false \
+        -Dsystemdsystemunitdir=/usr/lib/systemd/system \
+        -Ddbus_policy_dir=/usr/share/dbus-1/system.d
+
+    ninja -C "${bdir}" ${MAKEFLAGS}
+    DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
+    merge_doubled_sysroot
+
+    log "ModemManager instalado en ${LFS_SYSROOT}/usr"
+}
+step_verify_modemmanager() {
+    log "Verificación: ModemManager (daemon, libmm-glib, .pc, unidad systemd)"
+    local ok=1 p
+    for p in "${LFS_SYSROOT}/usr/sbin/ModemManager" "${LFS_SYSROOT}/usr/lib/libmm-glib.so" \
+             "${LFS_SYSROOT}/usr/lib/pkgconfig/ModemManager.pc" \
+             "${LFS_SYSROOT}/usr/lib/systemd/system/ModemManager.service"; do
+        if [[ -e "${p}" ]]; then echo "  [OK] ${p}"; else echo "  [FALTA] ${p}"; ok=0; fi
+    done
+    [[ "${ok}" -eq 1 ]] || die "falta algo de ModemManager en el sysroot"
+    log "OK: ModemManager completo en el sysroot."
+}
+
+# modemmanager-qt -- KF6ModemManagerQt, lo pide plasma-nm sin condición.
+# Sólo ModemManager >= 1.0 (headers + .pc) + Qt6 Core/DBus/Xml.
+step_modemmanager_qt() {
+    [[ -e "${LFS_SYSROOT}/usr/lib/pkgconfig/ModemManager.pc" ]] \
+        || die "falta ModemManager -- corré primero: scripts/build-kde.sh modemmanager"
+    _kf6_cmake_build KF6ModemManagerQt modemmanager-qt
+}
+step_verify_modemmanager_qt() { _kf6_verify_lib KF6ModemManagerQt libKF6ModemManagerQt.so; }
+
+# ------------------------------------------------------------------------------
+# Paquetes de Plasma 6.7.4 por encima de plasma-workspace. Flags confirmados
+# contra los option() reales de cada CMakeLists.txt (docs/PENDIENTES.md,
+# "Escritorio usable"). WITH_X11=OFF ya lo pasa _plasma_cmake_build
+# (plasma5support, kscreen, kde-cli-tools lo tienen como option real).
+# ------------------------------------------------------------------------------
+
+# plasma5support -- REQUIRED de plasma-desktop (dataengines heredados).
+step_plasma5support()        { _plasma_cmake_build Plasma5Support plasma5support; }
+step_verify_plasma5support() { _kf6_verify_lib Plasma5Support libPlasma5Support.so; }
+
+# Boost (sólo headers) -- kactivitymanagerd pide "find_package(Boost 1.58
+# REQUIRED)" (error real en el primer intento: "Could NOT find Boost
+# (missing: Boost_INCLUDE_DIR)") y lo único que usa es boost/range,
+# header-only (confirmado con grep de sus #include). No hace falta compilar
+# nada de Boost: se copia el árbol boost/ del tarball oficial al sysroot.
+step_boost_headers() {
+    log "Boost ${BOOST_VERSION} (sólo headers) en el sysroot"
+
+    cd "${LFS_SOURCES}"
+    fetch "${BOOST_MIRROR}/boost-${BOOST_VERSION}-b2-nodocs.tar.xz" \
+          "boost-${BOOST_VERSION}-b2-nodocs.tar.xz"
+    log_sha256 "${LFS_SOURCES}/boost-${BOOST_VERSION}-b2-nodocs.tar.xz"
+    extract_once "${LFS_SOURCES}/boost-${BOOST_VERSION}-b2-nodocs.tar.xz" \
+                 "${LFS_BUILD}/.extracted-boost-${BOOST_VERSION}"
+
+    rm -rf "${LFS_SYSROOT}/usr/include/boost"
+    cp -a "${LFS_BUILD}/boost-${BOOST_VERSION}/boost" "${LFS_SYSROOT}/usr/include/"
+
+    log "headers de Boost instalados en ${LFS_SYSROOT}/usr/include/boost"
+}
+step_verify_boost_headers() {
+    log "Verificación: boost/version.hpp en el sysroot"
+    local p="${LFS_SYSROOT}/usr/include/boost/version.hpp"
+    [[ -e "${p}" ]] || die "no está ${p}"
+    echo "  [OK] ${p}"
+    log "OK: headers de Boost en el sysroot."
+}
+
+# kactivitymanagerd -- el servicio de actividades que PlasmaActivities
+# consume por D-Bus en runtime.
+step_kactivitymanagerd() {
+    [[ -e "${LFS_SYSROOT}/usr/include/boost/version.hpp" ]] \
+        || die "faltan los headers de Boost -- corré primero: scripts/build-kde.sh boost-headers"
+    _plasma_cmake_build KActivityManagerD kactivitymanagerd
+}
+step_verify_kactivitymanagerd() {
+    log "Verificación: kactivitymanagerd en el sysroot"
+    local p="${LFS_SYSROOT}/usr/lib/libexec/kactivitymanagerd"
+    [[ -x "${p}" ]] || die "no está ${p}"
+    echo "  [OK] ${p}"
+    log "OK: kactivitymanagerd completo en el sysroot."
+}
+
+# qqc2-breeze-style -- estilo QtQuick Controls Breeze (KCMs QML, Kirigami).
+step_qqc2_breeze_style() { _plasma_cmake_build QQC2BreezeStyle qqc2-breeze-style; }
+step_verify_qqc2_breeze_style() {
+    log "Verificación: módulo QML org.kde.breeze en el sysroot"
+    local p
+    p="$(find "${LFS_SYSROOT}/usr/lib" -type d -path '*/qml/org/kde/breeze' -print -quit 2>/dev/null)"
+    [[ -n "${p}" ]] || die "no se encontró el módulo QML org/kde/breeze"
+    echo "  [OK] ${p}"
+    log "OK: qqc2-breeze-style completo en el sysroot."
+}
+
+# plasma-integration -- plugin de tema de plataforma Qt (apariencia KDE en
+# apps Qt, diálogos de archivo, etc.). BUILD_QT5=ON por default en su
+# CMakeLists.txt real: pediría Qt5 entero -- se apaga.
+# Error real en el primer intento: "REQUIRED package(s) are missing: X11,
+# Required for updating the Cursor theme on X11". Todo su código X11 está
+# detrás de "#if HAVE_X11" (#cmakedefine01, queda en 0) y la búsqueda de XCB
+# también está dentro de "if(HAVE_X11)" -- pero XCB::XCB se linkea sin
+# condición. Se pasa X11 a OPTIONAL y se saca ese link: el plugin lo carga
+# CUALQUIER app Qt, no tiene que arrastrar libxcb a todas.
+_patch_plasma_integration() {
+    local src="$1"
+    python3 - "${src}" <<'PYEOF'
+import sys
+
+src = sys.argv[1]
+
+def patch_file(relpath, replacements):
+    path = f"{src}/{relpath}"
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    for old, new in replacements:
+        count = content.count(old)
+        if count == 0:
+            sys.exit(f"ERROR: ancla de patch no encontrada en {path}:\n{old!r}")
+        if count > 1:
+            sys.exit(f"ERROR: ancla de patch no es única en {path} ({count} veces):\n{old!r}")
+        content = content.replace(old, new)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"OK: {path} parcheado ({len(replacements)} reemplazos)")
+
+patch_file("qt6/src/platformtheme/CMakeLists.txt", [
+    (
+        '                        URL "https://www.x.org"\n'
+        '                        TYPE REQUIRED\n',
+        '                        URL "https://www.x.org"\n'
+        '                        TYPE OPTIONAL\n',
+    ),
+    ("        KF6::GuiAddons\n        XCB::XCB\n", "        KF6::GuiAddons\n"),
+    # Error real en el segundo intento: x11integration.cpp se compila siempre
+    # (incluye <NETWM>, de KWindowSystem con X11, que no existe). Su única
+    # instanciación ya está dentro de "#if HAVE_X11" en kdeplatformtheme.cpp.
+    ("    x11integration.cpp x11integration.h\n", ""),
+])
+# La clase sale del build, así que el miembro QScopedPointer<X11Integration>
+# (que necesita el tipo completo para destruirse) y su include van detrás del
+# mismo HAVE_X11 que ya usa la instanciación.
+patch_file("qt6/src/platformtheme/kdeplatformtheme.h", [
+    (
+        "#include <private/qgenericunixthemes_p.h>\n",
+        "#include <private/qgenericunixthemes_p.h>\n\n#include <config-platformtheme.h>\n",
+    ),
+    (
+        "    QScopedPointer<X11Integration> m_x11Integration;\n",
+        "#if HAVE_X11\n    QScopedPointer<X11Integration> m_x11Integration;\n#endif\n",
+    ),
+])
+patch_file("qt6/src/platformtheme/kdeplatformtheme.cpp", [
+    ('#include "x11integration.h"\n', '#if HAVE_X11\n#include "x11integration.h"\n#endif\n'),
+])
+PYEOF
+}
+step_plasma_integration() { _plasma_cmake_build PlasmaIntegration plasma-integration -DBUILD_QT5=OFF; }
+step_verify_plasma_integration() {
+    log "Verificación: KDEPlasmaPlatformTheme6 en el sysroot"
+    local p
+    p="$(find "${LFS_SYSROOT}/usr/lib" -name 'KDEPlasmaPlatformTheme6.so' -print -quit 2>/dev/null)"
+    [[ -n "${p}" ]] || die "no se encontró KDEPlasmaPlatformTheme6.so"
+    echo "  [OK] ${p}"
+    log "OK: plasma-integration completo en el sysroot."
+}
+
+# plasma-desktop -- el paquete de escritorio en sí (shell
+# org.kde.plasma.desktop: panel, kickoff, taskmanager) + la mayoría de los
+# KCMs. Wayland puro (decisión de Juani, 2026-10-22, por la filosofía del
+# sistema): sin libX11 en el sysroot, el KCM de teclado y kaccess se saltean
+# solos (están detrás de "if(X11_Xkb_FOUND AND XCB_XKB_FOUND)"). Flags:
+# BUILD_KCM_{MOUSE,TOUCHPAD}_X11=OFF (piden headers del driver
+# xorg-libinput), BUILD_KCM_TABLET=OFF (pide libwacom; no hay tabletas en
+# el laboratorio), BUILD_DOC=OFF (pide KF6DocTools, no compilado).
+_patch_plasma_desktop() {
+    local src="$1"
+    python3 - "${src}" <<'PYEOF'
+import sys
+
+src = sys.argv[1]
+
+def patch_file(relpath, replacements):
+    path = f"{src}/{relpath}"
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    for old, new in replacements:
+        count = content.count(old)
+        if count == 0:
+            sys.exit(f"ERROR: ancla de patch no encontrada en {path}:\n{old!r}")
+        if count > 1:
+            sys.exit(f"ERROR: ancla de patch no es única en {path} ({count} veces):\n{old!r}")
+        content = content.replace(old, new)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"OK: {path} parcheado ({len(replacements)} reemplazos)")
+
+# X11 declarado "TYPE REQUIRED" sin condición: con eso feature_summary corta
+# el configure. Todo lo que de verdad usa X11 ya tiene su propio guard.
+patch_file("CMakeLists.txt", [
+    (
+        '    PURPOSE "Required for building the X11 based workspace"\n'
+        '    TYPE REQUIRED\n',
+        '    PURPOSE "Required for building the X11 based workspace"\n'
+        '    TYPE OPTIONAL\n',
+    ),
+    # Error real en el primer intento: KSMServerDBusInterface no existe en el
+    # sysroot -- plasma-workspace 6.7.4 sólo compila ksmserver (que es quien
+    # la instala) "if(WITH_X11)". En plasma-desktop este find_package es lo
+    # ÚNICO que la menciona: ningún CMakeLists.txt usa la variable que define.
+    ("find_package(KSMServerDBusInterface CONFIG REQUIRED)\n", ""),
+])
+
+# Error real en el segundo intento: 'Couldn't find XKB location in
+# CMAKE_SYSROOT: "/lfs//lfs/usr/share/X11/xkb"'. pkg_get_variable(xkb_base)
+# vuelve con el sysroot adentro (PKG_CONFIG_SYSROOT_DIR, mismo bug de fondo
+# que /lfs/lfs) y XKBDIR además se COMPILA en el binario para buscar layouts
+# en runtime -- se le saca el prefijo del sysroot apenas se lee.
+# Cuarto intento: 'Unknown CMake command "check_function_exists"' -- bug real
+# de upstream: ConfigureChecks.cmake usa check_function_exists/
+# check_include_files sin incluir sus módulos (antes no se llegaba a esa
+# línea porque el configure cortaba antes). Se incluyen arriba de todo.
+patch_file("ConfigureChecks.cmake", [
+    (
+        "pkg_get_variable(XKBDIR xkeyboard-config xkb_base)\n",
+        "include(CheckFunctionExists)\ninclude(CheckIncludeFiles)\n\n"
+        "pkg_get_variable(XKBDIR xkeyboard-config xkb_base)\n",
+    ),
+])
+
+# Tercer intento: ya sin el prefijo, la comprobación seguía fallando sobre
+# "/lfs//usr/share/X11/xkb" -- xkeyboard-config 2.48 instala X11/xkb como
+# symlink ABSOLUTO a /usr/share/xkeyboard-config-2 (confirmado con ls -la):
+# correcto en el sistema real, colgado dentro del sysroot. Se acepta el
+# symlink.
+patch_file("ConfigureChecks.cmake", [
+    (
+        "pkg_get_variable(XKBDIR xkeyboard-config xkb_base)\n",
+        "pkg_get_variable(XKBDIR xkeyboard-config xkb_base)\n"
+        "if (CMAKE_SYSROOT)\n"
+        "    string(REGEX REPLACE \"^${CMAKE_SYSROOT}\" \"\" XKBDIR \"${XKBDIR}\")\n"
+        "endif()\n",
+    ),
+    (
+        '    if (NOT EXISTS "${CMAKE_SYSROOT}/${XKBDIR}")\n',
+        '    if (NOT EXISTS "${CMAKE_SYSROOT}/${XKBDIR}" AND NOT IS_SYMLINK "${CMAKE_SYSROOT}/${XKBDIR}")\n',
+    ),
+])
+
+# KKeyServer (símbolo de KWindowSystem que sólo existe compilado con X11) es
+# un include muerto acá; X11::X11 se linkea sin usarse.
+patch_file("kcms/access/kcmaccess.cpp", [
+    ("#include <KKeyServer>\n", ""),
+])
+patch_file("kcms/access/CMakeLists.txt", [
+    ("    KF6::XmlGui\n    X11::X11\n)", "    KF6::XmlGui\n)"),
+])
+
+# KWindowInfo se incluye sin guard, pero su único uso ya está dentro de
+# "#if HAVE_X11" -- se mueve el include adentro del guard que ya existe.
+patch_file("imports/activitymanager/switcherbackend.cpp", [
+    (
+        "#include <KWindowInfo>\n#include <KWindowSystem>\n#if HAVE_X11\n#include <KX11Extras>\n#endif\n",
+        "#include <KWindowSystem>\n#if HAVE_X11\n#include <KWindowInfo>\n#include <KX11Extras>\n#endif\n",
+    ),
+])
+
+# netwm.h: include muerto (no hay ningún NET:: en el applet).
+patch_file("applets/taskmanager/backend.h", [
+    ("#include <netwm.h>\n", ""),
+])
+
+# Quinto intento: fixx11h.h (helper de KWindowSystem que sólo se instala con
+# X11) incluido sin guard al final del archivo; sólo deshace macros de Xlib.
+patch_file("kcms/mouse/inputbackend.cpp", [
+    ("#include <fixx11h.h>\n", ""),
+])
+PYEOF
+}
+step_plasma_desktop() {
+    _plasma_cmake_build PlasmaDesktop plasma-desktop \
+        -DBUILD_DOC=OFF \
+        -DBUILD_KCM_MOUSE_X11=OFF \
+        -DBUILD_KCM_TOUCHPAD_X11=OFF \
+        -DBUILD_KCM_TABLET=OFF
+}
+step_verify_plasma_desktop() {
+    log "Verificación: shell org.kde.plasma.desktop en el sysroot"
+    local p="${LFS_SYSROOT}/usr/share/plasma/shells/org.kde.plasma.desktop/metadata.json"
+    [[ -e "${p}" ]] || die "no está ${p}"
+    echo "  [OK] ${p}"
+    log "OK: plasma-desktop completo en el sysroot."
+}
+
+step_systemsettings() { _plasma_cmake_build SystemSettings systemsettings; }
+step_verify_systemsettings() {
+    log "Verificación: systemsettings en el sysroot"
+    [[ -x "${LFS_SYSROOT}/usr/bin/systemsettings" ]] || die "no está ${LFS_SYSROOT}/usr/bin/systemsettings"
+    echo "  [OK] ${LFS_SYSROOT}/usr/bin/systemsettings"
+    log "OK: systemsettings completo en el sysroot."
+}
+
+# kde-cli-tools -- kde-open, kioclient, kde-inhibit, etc. (los usan el
+# escritorio y xdg-open). BUILD_DOC=OFF (KF6DocTools no compilado).
+step_kde_cli_tools() { _plasma_cmake_build KdeCliTools kde-cli-tools -DBUILD_DOC=OFF; }
+step_verify_kde_cli_tools() {
+    log "Verificación: kde-open en el sysroot"
+    [[ -x "${LFS_SYSROOT}/usr/bin/kde-open" ]] || die "no está ${LFS_SYSROOT}/usr/bin/kde-open"
+    echo "  [OK] ${LFS_SYSROOT}/usr/bin/kde-open"
+    log "OK: kde-cli-tools completo en el sysroot."
+}
+
+# Parche común a varios paquetes de Plasma (bug sistémico de upstream, ver
+# _patch_libplasma): "#include <KX11Extras>" sin guard, con el uso detrás de
+# un chequeo de runtime. KX11Extras sólo existe con KWindowSystem compilado
+# con X11 -- se saca el include y la rama X11 muerta.
+_apply_x11_patches() {
+    local src="$1" spec="$2"
+    python3 - "${src}" "${spec}" <<'PYEOF'
+import sys
+
+src, spec = sys.argv[1], sys.argv[2]
+
+def patch_file(relpath, replacements):
+    path = f"{src}/{relpath}"
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    for old, new in replacements:
+        count = content.count(old)
+        if count == 0:
+            sys.exit(f"ERROR: ancla de patch no encontrada en {path}:\n{old!r}")
+        if count > 1:
+            sys.exit(f"ERROR: ancla de patch no es única en {path} ({count} veces):\n{old!r}")
+        content = content.replace(old, new)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"OK: {path} parcheado ({len(replacements)} reemplazos)")
+
+if spec == "polkit-kde-agent-1":
+    patch_file("policykitlistener.cpp", [
+        ("#include <KWindowSystem>\n#include <KX11Extras>\n", "#include <KWindowSystem>\n"),
+        (
+            "    } else if (KWindowSystem::isPlatformX11()) {\n"
+            "        KX11Extras::forceActiveWindow(m_dialog->windowHandle()->winId());\n"
+            "    }\n",
+            "    }\n",
+        ),
+    ])
+elif spec == "kscreen":
+    # La rama "else" de osd.cpp es la de X11; se dejan sus líneas de geometría
+    # (compilan igual) y se sacan sólo las dos llamadas a KX11Extras.
+    patch_file("osd/osd.cpp", [
+        ("#include <KWindowSystem>\n#include <KX11Extras>\n", "#include <KWindowSystem>\n"),
+        (
+            "        KX11Extras::setState(m_osdActionSelector->winId(), NET::SkipPager | NET::SkipSwitcher | NET::SkipTaskbar);\n"
+            "        KX11Extras::setType(m_osdActionSelector->winId(), NET::OnScreenDisplay);\n",
+            "",
+        ),
+    ])
+elif spec == "plasma-nm":
+    patch_file("libs/handler.cpp", [
+        ("#include <KWindowSystem>\n#include <KX11Extras>\n", "#include <KWindowSystem>\n"),
+        (
+            "        if (KWindowSystem::isPlatformX11()) {\n"
+            "            KX11Extras::setState(editor->winId(), NET::KeepAbove);\n"
+            "        }\n"
+            "\n",
+            "",
+        ),
+    ])
+    patch_file("kded/secretagent.cpp", [
+        ("#include <KWindowSystem>\n#include <KX11Extras>\n", "#include <KWindowSystem>\n"),
+        (
+            "            if (KWindowSystem::isPlatformX11()) {\n"
+            "                KX11Extras::setState(m_dialog->winId(), NET::KeepAbove);\n"
+            "            }\n",
+            "",
+        ),
+    ])
+    patch_file("kded/pindialog.cpp", [
+        ("#include <KWindowSystem>\n#include <KX11Extras>\n", "#include <KWindowSystem>\n"),
+        (
+            "    if (KWindowSystem::isPlatformX11()) {\n"
+            "        KX11Extras::setState(winId(), NET::KeepAbove);\n"
+            "    }\n"
+            "\n",
+            "",
+        ),
+    ])
+elif spec == "powerdevil":
+    # Acá el código X11 usa QX11Info (Qt con plataforma xcb, que no tenemos),
+    # pero HAVE_XCB sale de XCB_FOUND -- y XCB sí está (libxcb mínima). Se
+    # fuerza HAVE_XCB a 0, se sacan los includes de qtx11extras y en dpms.cpp
+    # queda sólo la rama de Wayland (sin efecto de fade propio: lo hace kwin).
+    patch_file("daemon/CMakeLists.txt", [
+        ("set(HAVE_XCB ${XCB_FOUND})\n", "set(HAVE_XCB 0)\n"),
+    ])
+    patch_file("daemon/kwinkscreenhelpereffect.cpp", [
+        ("#include <private/qtx11extras_p.h>\n", ""),
+    ])
+    patch_file("daemon/actions/bundled/dpms.cpp", [
+        ("#include <private/qtx11extras_p.h>\n", ""),
+        (
+            "    if (QX11Info::isPlatformX11()) {\n"
+            "        auto fadeEffect = new PowerDevil::KWinKScreenHelperEffect(this);\n"
+            "        connect(this, &DPMS::startFade, fadeEffect, &PowerDevil::KWinKScreenHelperEffect::start);\n"
+            "        connect(this, &DPMS::stopFade, fadeEffect, &PowerDevil::KWinKScreenHelperEffect::stop);\n"
+            "        connect(fadeEffect, &PowerDevil::KWinKScreenHelperEffect::fadedOut, this, &DPMS::turnOffOnIdleTimeout);\n"
+            "    } else {\n"
+            "        // short-cut without fadeEffect in between timeout and actual action (compositor handles fading)\n"
+            "        connect(this, &DPMS::startFade, this, &DPMS::turnOffOnIdleTimeout);\n"
+            "    }\n",
+            "    // short-cut without fadeEffect in between timeout and actual action (compositor handles fading)\n"
+            "    connect(this, &DPMS::startFade, this, &DPMS::turnOffOnIdleTimeout);\n",
+        ),
+    ])
+elif spec == "plasma-login-manager":
+    # Error real: el greeter linkea X11::X11 sin usar Xlib (su único rastro
+    # de X11 es KWindowSystem::isPlatformX11() en main.cpp, que no necesita
+    # libX11). XAuth.cpp del helper usa X11/Xauth.h, que es de libXau (sí
+    # está en el sysroot) -- ese no se toca.
+    patch_file("src/frontend/greeter/CMakeLists.txt", [
+        ("    KF6::ConfigCore\n    X11::X11\n", "    KF6::ConfigCore\n"),
+    ])
+else:
+    sys.exit(f"ERROR: spec desconocido {spec}")
+PYEOF
+}
+_patch_polkit_kde_agent_1() { _apply_x11_patches "$1" polkit-kde-agent-1; }
+_patch_kscreen()            { _apply_x11_patches "$1" kscreen; }
+_patch_plasma_nm()          { _apply_x11_patches "$1" plasma-nm; }
+_patch_powerdevil()         { _apply_x11_patches "$1" powerdevil; }
+_patch_plasma_login_manager() { _apply_x11_patches "$1" plasma-login-manager; }
+
+# polkit-kde-agent-1 -- los diálogos de autenticación de polkit.
+step_polkit_kde_agent() { _plasma_cmake_build PolkitKdeAgent polkit-kde-agent-1; }
+step_verify_polkit_kde_agent() {
+    log "Verificación: polkit-kde-authentication-agent-1 en el sysroot"
+    local p="${LFS_SYSROOT}/usr/lib/libexec/polkit-kde-authentication-agent-1"
+    [[ -x "${p}" ]] || die "no está ${p}"
+    echo "  [OK] ${p}"
+    log "OK: polkit-kde-agent-1 completo en el sysroot."
+}
+
+# milou -- la vista de resultados de búsqueda de KRunner/kickoff.
+step_milou() { _plasma_cmake_build Milou milou; }
+step_verify_milou() {
+    log "Verificación: milou en el sysroot"
+    local p
+    p="$(find "${LFS_SYSROOT}/usr/lib" -path '*milou*' -name '*.so' -print -quit 2>/dev/null)"
+    [[ -n "${p}" ]] || die "no se encontró ninguna librería/plugin de milou"
+    echo "  [OK] ${p}"
+    log "OK: milou completo en el sysroot."
+}
+
+# kscreen -- configuración de pantallas (KCM + daemon kded + OSD).
+step_kscreen() { _plasma_cmake_build KScreen kscreen; }
+step_verify_kscreen() {
+    log "Verificación: kscreen en el sysroot"
+    local p
+    p="$(find "${LFS_SYSROOT}/usr/lib" -name 'kcm_kscreen.so' -print -quit 2>/dev/null)"
+    [[ -n "${p}" ]] || die "no se encontró kcm_kscreen.so"
+    echo "  [OK] ${p}"
+    log "OK: kscreen completo en el sysroot."
+}
+
+# powerdevil -- gestión de energía (suspensión, brillo, batería). Pide XCB
+# RANDR/DPMS REQUIRED: los da la libxcb mínima que ya está.
+step_powerdevil() { _plasma_cmake_build PowerDevil powerdevil; }
+step_verify_powerdevil() {
+    log "Verificación: org_kde_powerdevil en el sysroot"
+    local p="${LFS_SYSROOT}/usr/lib/libexec/org_kde_powerdevil"
+    [[ -x "${p}" ]] || die "no está ${p}"
+    echo "  [OK] ${p}"
+    log "OK: powerdevil completo en el sysroot."
+}
+
+# plasma-nm -- applet y KCM de red. BUILD_OPENCONNECT=OFF: con el plugin VPN
+# de OpenConnect pide Qt6WebEngineWidgets (Chromium entero) REQUIRED.
+step_plasma_nm() { _plasma_cmake_build PlasmaNM plasma-nm -DBUILD_OPENCONNECT=OFF; }
+step_verify_plasma_nm() {
+    log "Verificación: applet org.kde.plasma.networkmanagement en el sysroot"
+    local p
+    p="$(find "${LFS_SYSROOT}/usr" -path '*org.kde.plasma.networkmanagement*' -print -quit 2>/dev/null)"
+    [[ -n "${p}" ]] || die "no se encontró el applet org.kde.plasma.networkmanagement"
+    echo "  [OK] ${p}"
+    log "OK: plasma-nm completo en el sysroot."
+}
+
+# plasma-pa -- applet y KCM de volumen. libpulse sólo cliente (habla con
+# pipewire-pulse). BUILD_DOC=OFF.
+step_plasma_pa() { _plasma_cmake_build PlasmaPA plasma-pa -DBUILD_DOC=OFF; }
+step_verify_plasma_pa() {
+    log "Verificación: applet org.kde.plasma.volume en el sysroot"
+    local p
+    p="$(find "${LFS_SYSROOT}/usr" -path '*org.kde.plasma.volume*' -print -quit 2>/dev/null)"
+    [[ -n "${p}" ]] || die "no se encontró el applet org.kde.plasma.volume"
+    echo "  [OK] ${p}"
+    log "OK: plasma-pa completo en el sysroot."
+}
+
+# xdg-desktop-portal-kde -- backend KDE de los portales (diálogos de archivo,
+# captura de pantalla, etc. para Flatpak y apps sandbox -- Fase 7).
+step_xdg_desktop_portal_kde() { _plasma_cmake_build XdgDesktopPortalKDE xdg-desktop-portal-kde; }
+step_verify_xdg_desktop_portal_kde() {
+    log "Verificación: xdg-desktop-portal-kde en el sysroot"
+    local p="${LFS_SYSROOT}/usr/lib/libexec/xdg-desktop-portal-kde"
+    [[ -x "${p}" ]] || die "no está ${p}"
+    echo "  [OK] ${p}"
+    log "OK: xdg-desktop-portal-kde completo en el sysroot."
+}
+
+# plasma-login-manager -- el login manager de Plasma 6.7 (sale en el mismo
+# release, no hace falta SDDM). Sus rutas de systemd tienen override real
+# ("if (NOT DEFINED SYSTEMD_SYSTEM_UNIT_DIR) pkg_get_variable(...)" en su
+# CMakeLists.txt) -- se pasan explícitas por el bug del doble sysroot.
+# INSTALL_PAM_CONFIGURATION=ON (default) deja sus archivos de /etc/pam.d.
+# Error real en el primer intento: "Unknown operating system detected! No
+# provided PAM configuration files exist for OS ID ''" -- el CMake elige la
+# plantilla PAM leyendo /etc/os-release (fedora/suse/kde-linux/arch/debian).
+# PAM_OS_CONFIGURATION es una variable de caché ("auto" por default): se
+# fija en "debian" porque la cadena PAM de Fase 4 YA es estilo Debian
+# (common-auth/-account/-password/-session, ver step_pam_config en
+# build-comms.sh) -- las plantillas de upstream hacen "@include common-*" y
+# heredan solas faillock + FIDO2.
+step_plasma_login_manager() {
+    _plasma_cmake_build PlasmaLoginManager plasma-login-manager \
+        -DPAM_OS_CONFIGURATION=debian \
+        -DSYSTEMD_SYSTEM_UNIT_DIR=/usr/lib/systemd/system \
+        -DSYSTEMD_SYSUSERS_DIR=/usr/lib/sysusers.d \
+        -DSYSTEMD_TMPFILES_DIR=/usr/lib/tmpfiles.d
+}
+step_verify_plasma_login_manager() {
+    log "Verificación: plasma-login-manager en el sysroot"
+    local p
+    p="$(find "${LFS_SYSROOT}/usr/lib/systemd/system" -iname '*plasma*login*.service' -print -quit 2>/dev/null)"
+    [[ -n "${p}" ]] || die "no se encontró la unidad systemd de plasma-login-manager"
+    echo "  [OK] ${p}"
+    log "OK: plasma-login-manager completo en el sysroot."
+}
+
 # ------------------------------------------------------------------------------
 # KCMUtils -- framework de KDE Frameworks (KDE_VERSION 6.29.0, mismo tren
 # que Tier 2, NO Plasma) descubierto recién como dependencia real de
@@ -6606,6 +7647,60 @@ main() {
         verify-xcbproto)          step_verify_xcbproto ;;
         libxcb)                   step_libxcb ;;
         verify-libxcb)            step_verify_libxcb ;;
+        xcb-util)                 step_xcb_util ;;
+        verify-xcb-util)          step_verify_xcb_util ;;
+        xcb-util-image)           step_xcb_util_image ;;
+        verify-xcb-util-image)    step_verify_xcb_util_image ;;
+        knotifyconfig)            step_knotifyconfig ;;
+        verify-knotifyconfig)     step_verify_knotifyconfig ;;
+        kunitconversion)          step_kunitconversion ;;
+        verify-kunitconversion)   step_verify_kunitconversion ;;
+        qqc2-desktop-style)       step_qqc2_desktop_style ;;
+        verify-qqc2-desktop-style) step_verify_qqc2_desktop_style ;;
+        libsndfile)               step_libsndfile ;;
+        verify-libsndfile)        step_verify_libsndfile ;;
+        libpulse)                 step_libpulse ;;
+        verify-libpulse)          step_verify_libpulse ;;
+        pulseaudio-qt)            step_pulseaudio_qt ;;
+        verify-pulseaudio-qt)     step_verify_pulseaudio_qt ;;
+        qtkeychain)               step_qtkeychain ;;
+        verify-qtkeychain)        step_verify_qtkeychain ;;
+        modemmanager)             step_modemmanager ;;
+        verify-modemmanager)      step_verify_modemmanager ;;
+        modemmanager-qt)          step_modemmanager_qt ;;
+        verify-modemmanager-qt)   step_verify_modemmanager_qt ;;
+        plasma5support)           step_plasma5support ;;
+        verify-plasma5support)    step_verify_plasma5support ;;
+        boost-headers)            step_boost_headers ;;
+        verify-boost-headers)     step_verify_boost_headers ;;
+        kactivitymanagerd)        step_kactivitymanagerd ;;
+        verify-kactivitymanagerd) step_verify_kactivitymanagerd ;;
+        qqc2-breeze-style)        step_qqc2_breeze_style ;;
+        verify-qqc2-breeze-style) step_verify_qqc2_breeze_style ;;
+        plasma-integration)       step_plasma_integration ;;
+        verify-plasma-integration) step_verify_plasma_integration ;;
+        plasma-desktop)           step_plasma_desktop ;;
+        verify-plasma-desktop)    step_verify_plasma_desktop ;;
+        systemsettings)           step_systemsettings ;;
+        verify-systemsettings)    step_verify_systemsettings ;;
+        kde-cli-tools)            step_kde_cli_tools ;;
+        verify-kde-cli-tools)     step_verify_kde_cli_tools ;;
+        polkit-kde-agent)         step_polkit_kde_agent ;;
+        verify-polkit-kde-agent)  step_verify_polkit_kde_agent ;;
+        milou)                    step_milou ;;
+        verify-milou)             step_verify_milou ;;
+        kscreen)                  step_kscreen ;;
+        verify-kscreen)           step_verify_kscreen ;;
+        powerdevil)               step_powerdevil ;;
+        verify-powerdevil)        step_verify_powerdevil ;;
+        plasma-nm)                step_plasma_nm ;;
+        verify-plasma-nm)         step_verify_plasma_nm ;;
+        plasma-pa)                step_plasma_pa ;;
+        verify-plasma-pa)         step_verify_plasma_pa ;;
+        xdg-desktop-portal-kde)   step_xdg_desktop_portal_kde ;;
+        verify-xdg-desktop-portal-kde) step_verify_xdg_desktop_portal_kde ;;
+        plasma-login-manager)     step_plasma_login_manager ;;
+        verify-plasma-login-manager) step_verify_plasma_login_manager ;;
         libplasma)                step_libplasma ;;
         verify-libplasma)         step_verify_libplasma ;;
         kwayland)                 step_kwayland ;;
@@ -6820,7 +7915,35 @@ main() {
             step_knetworkmanagerqt; step_verify_knetworkmanagerqt
             step_polkitqt1;        step_verify_polkitqt1
             step_plasma_workspace; step_verify_plasma_workspace
-            log "Fase 6 Parte 3: Tier 0 (ECM) + Tier 1 (Qt6) + Tier 2 (KF6 completo) + Tier 3 en progreso (Plasma Activities + libplasma) completo. Sigue el resto de Tier 3 -- ver el mapa de dependencias al principio de este archivo."
+            # Escritorio usable (2026-10-22) -- ver docs/PENDIENTES.md.
+            step_xcb_util;         step_verify_xcb_util
+            step_xcb_util_image;   step_verify_xcb_util_image
+            step_knotifyconfig;    step_verify_knotifyconfig
+            step_kunitconversion;  step_verify_kunitconversion
+            step_qqc2_desktop_style; step_verify_qqc2_desktop_style
+            step_libsndfile;       step_verify_libsndfile
+            step_libpulse;         step_verify_libpulse
+            step_pulseaudio_qt;    step_verify_pulseaudio_qt
+            step_qtkeychain;       step_verify_qtkeychain
+            step_modemmanager;     step_verify_modemmanager
+            step_modemmanager_qt;  step_verify_modemmanager_qt
+            step_plasma5support;   step_verify_plasma5support
+            step_boost_headers;    step_verify_boost_headers
+            step_kactivitymanagerd; step_verify_kactivitymanagerd
+            step_qqc2_breeze_style; step_verify_qqc2_breeze_style
+            step_plasma_integration; step_verify_plasma_integration
+            step_plasma_desktop;   step_verify_plasma_desktop
+            step_systemsettings;   step_verify_systemsettings
+            step_kde_cli_tools;    step_verify_kde_cli_tools
+            step_polkit_kde_agent; step_verify_polkit_kde_agent
+            step_milou;            step_verify_milou
+            step_kscreen;          step_verify_kscreen
+            step_powerdevil;       step_verify_powerdevil
+            step_plasma_nm;        step_verify_plasma_nm
+            step_plasma_pa;        step_verify_plasma_pa
+            step_xdg_desktop_portal_kde; step_verify_xdg_desktop_portal_kde
+            step_plasma_login_manager; step_verify_plasma_login_manager
+            log "Fase 6 Parte 3: núcleo de Plasma compilado; escritorio usable en curso -- ver docs/PENDIENTES.md."
             ;;
         *)
             die "target desconocido: ${target} (usar: ecm|qtbase-native|qtshadertools-native|qtdeclarative-native|qttools-native|qtbase|qtshadertools|qtdeclarative|qtsvg|qt5compat|qttools|qtwayland|isocodes|plasma-wayland-protocols|kcodecs|kitemviews|kitemmodels|kcoreaddons|kconfig|kwidgetsaddons|ki18n|kdbusaddons|karchive|kglobalaccel|kguiaddons|kidletime|kwindowsystem|all, cada uno con su verify-<paso>)"

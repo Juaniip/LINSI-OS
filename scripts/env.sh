@@ -673,6 +673,33 @@ export NETWORKMANAGER_VERSION="1.50.0"
 # Core/DBus/Widgets nada más, todo ya en el sysroot.
 export POLKITQT1_VERSION="0.201.1"
 
+# Escritorio usable (2026-10-22) -- dependencias de terceros de plasma-pa y
+# plasma-nm (ver docs/PENDIENTES.md, "Escritorio usable"):
+# - libsndfile: dependency('sndfile') SIN condición en el meson.build real
+#   de pulseaudio (línea 615), aunque sólo se compile el cliente. Último
+#   release real con tarball en github.com/libsndfile/libsndfile/releases.
+# - pulseaudio: SÓLO la librería cliente (-Ddaemon=false) -- plasma-pa pide
+#   libpulse + libpulse-mainloop-glib; habla con pipewire-pulse, no hay
+#   servidor PulseAudio. 17.0 es el último de
+#   freedesktop.org/software/pulseaudio/releases/ (listado en vivo).
+# - pulseaudio-qt: plasma-pa pide KF6PulseAudioQt >= 1.6.0.
+# - qtkeychain: plasma-nm pide Qt6Keychain >= 0.16.0 (tag real en GitHub).
+# - ModemManager: plasma-nm pide ModemManagerQt sin condición. 1.24.2 es el
+#   último estable (las 1.25.x son "-dev", preliminares de la 1.26) --
+#   confirmado con la API de tags de gitlab.freedesktop.org; desde 1.20 ya
+#   no publican tarballs en freedesktop.org/software/ModemManager/ (ahí se
+#   corta en 1.18.12), así que se usa el archive del tag.
+export LIBSNDFILE_VERSION="1.2.2"
+export PULSEAUDIO_VERSION="17.0"
+export PULSEAUDIO_QT_VERSION="1.9.0"
+export QTKEYCHAIN_VERSION="0.17.0"
+export MODEMMANAGER_VERSION="1.24.2"
+# - Boost: kactivitymanagerd pide "find_package(Boost 1.58 REQUIRED)" y sólo
+#   usa boost/range (header-only, confirmado con grep de sus #include), así
+#   que alcanza con los headers. 1.92.0 = último release real de
+#   github.com/boostorg/boost/releases (API en vivo).
+export BOOST_VERSION="1.92.0"
+
 # libxcb (Tier 3, retrofit real 2026-09-04): libplasma v6.7.4 tiene un bug
 # real de upstream -- src/plasma/private/blureffectwatcher_p.h hace
 # "#include <xcb/xcb.h>" SIN ningún guard de preprocesador, aunque el uso
@@ -695,6 +722,15 @@ export LIBXAU_VERSION="1.0.12"
 export LIBXDMCP_VERSION="1.1.5"
 export XCBPROTO_VERSION="1.17.0"
 export LIBXCB_VERSION="1.17.0"
+
+# xcb-util + xcb-util-image (2026-10-22): plasma-desktop 6.7.4 pide "XCB
+# REQUIRED COMPONENTS XCB SHM IMAGE"; IMAGE sale de xcb-util-image, que
+# depende de xcb-util. Últimas versiones reales en
+# xorg.freedesktop.org/archive/individual/xcb/ (listado en vivo). libX11 y
+# libxkbfile se llegaron a compilar y se descartaron -- ver
+# docs/PENDIENTES.md, "Escritorio usable".
+export XCB_UTIL_VERSION="0.4.1"
+export XCB_UTIL_IMAGE_VERSION="0.4.1"
 
 # --- Rutas --------------------------------------------------------------------
 export LFS="${LFS:-/lfs}"
@@ -969,6 +1005,12 @@ export LIBSECRET_MIRROR="https://download.gnome.org/sources/libsecret/0.20"
 export LIBNDP_MIRROR="https://github.com/jpirko/libndp/archive/refs/tags"
 export NETWORKMANAGER_MIRROR="https://download.gnome.org/sources/NetworkManager/1.50"
 export POLKITQT1_MIRROR="https://download.kde.org/stable/polkit-qt-1"
+export LIBSNDFILE_MIRROR="https://github.com/libsndfile/libsndfile/releases/download/${LIBSNDFILE_VERSION}"
+export PULSEAUDIO_MIRROR="https://www.freedesktop.org/software/pulseaudio/releases"
+export PULSEAUDIO_QT_MIRROR="https://download.kde.org/stable/pulseaudio-qt"
+export QTKEYCHAIN_MIRROR="https://github.com/frankosterfeld/qtkeychain/archive/refs/tags"
+export BOOST_MIRROR="https://github.com/boostorg/boost/releases/download/boost-${BOOST_VERSION}"
+export MODEMMANAGER_MIRROR="https://gitlab.freedesktop.org/mobile-broadband/ModemManager/-/archive/${MODEMMANAGER_VERSION}"
 # libxcb y su cadena de dependencias: xorg.freedesktop.org, accesible en
 # vivo (a diferencia de gitlab.freedesktop.org) -- ver comentario real de
 # versión más arriba. Tres subdirectorios reales distintos del mismo
