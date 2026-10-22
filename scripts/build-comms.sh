@@ -196,10 +196,14 @@ step_openssl() {
     # fuerce --libdir=lib -- sin eso, todo (libssl.so, libcrypto.so,
     # openssl.pc, etc.) queda en ${LFS_SYSROOT}/usr/lib64 en vez de
     # .../usr/lib, y los pasos siguientes (libfido2, pam_u2f) no encuentran
-    # openssl.pc vía PKG_CONFIG_LIBDIR=.../usr/lib/pkgconfig. Se borra
-    # cualquier resto de ese intento antes de reinstalar bien, para que este
-    # paso quede idempotente incluso si ya corrió mal una vez.
-    rm -rf "${LFS_SYSROOT}/usr/lib64"
+    # openssl.pc vía PKG_CONFIG_LIBDIR=.../usr/lib/pkgconfig. El fix es
+    # --libdir=lib (más abajo).
+    #
+    # SACADO (2026-10-22): acá había un "rm -rf ${LFS_SYSROOT}/usr/lib64"
+    # para limpiar restos de aquel intento. Borraba el directorio ENTERO --
+    # incluida la libstdc++ que Fase 2 instalaba ahí -- y dejó al sysroot sin
+    # runtime de C++ (848 binarios la pedían). Ver step_libstdcxx en
+    # build-userspace.sh y docs/PENDIENTES.md.
 
     ./Configure linux-x86_64 \
         --cross-compile-prefix="${LFS_TGT}-" \

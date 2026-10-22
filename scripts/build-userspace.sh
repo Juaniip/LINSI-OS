@@ -14,6 +14,8 @@
 #   2. libstdcxx   -> soporte C++
 #   3. binutils2   -> binutils reconstruido ahora que existe glibc
 #   4. gcc2        -> GCC "de verdad", puede enlazar contra libc
+#   4b. gcc-runtime -> libstdc++/libgcc_s/libgomp finales (de gcc2) al
+#                     sysroot (gcc2 se instala en ${LFS_TOOLS}, no llegaban)
 #   5. attr/acl/libcap/util-linux -> dependencias de systemd (libmount,
 #      libblkid, libuuid, libcap, libacl) — sin esto instalado ANTES, meson
 #      simplemente las auto-deshabilita en vez de fallar, así que si no están
@@ -154,6 +156,12 @@ step_libstdcxx() {
     # /lfs/lfs/tools/... y el compilador (que sí busca en /lfs/tools/..., la
     # ruta real) no encuentra los headers. Este es justo el bug del intento
     # anterior.
+    #
+    # Nota (2026-10-22): esta libstdc++ es la de BOOTSTRAP (compilada con el
+    # GCC pass1, antes de gcc2) y cae en /usr/lib64 (el configure toma
+    # "../lib64" de -print-multi-os-directory, toolchain multilib). NO es la
+    # que usa el sistema final: esa la compila GCC pass 2 y la copia
+    # step_gcc_runtime a /usr/lib -- ver ahí por qué.
     ../libstdc++-v3/configure \
         --host="${LFS_TGT}" \
         --build="$(../config.guess)" \
@@ -183,6 +191,52 @@ EOF
     "${LFS_TOOLS}/bin/${LFS_TGT}-readelf" -d /tmp/linsi-checkxx | grep -i "libstdc++"
     rm -f /tmp/linsi-checkxx /tmp/linsi-checkxx.cpp
     log "OK: ${LFS_TGT}-g++ compila y enlaza C++ contra la libstdc++ del sysroot."
+}
+
+# ------------------------------------------------------------------------------
+# 4b) gcc-runtime — runtime de C++/GCC en el sysroot (agregado 2026-10-22).
+# Bug real crítico: un chequeo de clausura (cada NEEDED de cada ELF del
+# sysroot tiene que existir en el sysroot, scripts/check-sysroot.sh) encontró
+# libstdc++.so.6 ausente para 848 binarios, libgcc_s.so.1 para 845 y
+# libgomp.so.1 para 30 -- ningún programa C++ del sistema hubiera arrancado.
+#  - GCC pass 2 se instala con --prefix="${LFS_TOOLS}", así que sus librerías
+#    de runtime del TARGET (compiladas para x86_64-linsi-linux-gnu contra la
+#    glibc del sysroot) quedaban sólo en ${LFS_TOOLS}/${LFS_TGT}/lib64.
+#  - La libstdc++ de bootstrap de step_libstdcxx sí llegaba al sysroot, pero a
+#    /usr/lib64, y ese directorio lo borraban entero dos "rm -rf lib64" de
+#    Fase 4 (OpenSSL) y Fase 6 P1 (libffi) -- ya sacados.
+#  - Los verifies no lo veían porque g++ linkea contra la libstdc++ del
+#    TOOLCHAIN, no la del sysroot.
+# Se copian las tres versiones finales (las de GCC pass 2) junto a glibc, y se
+# borra la libstdc++ de bootstrap de /usr/lib64 para que no queden dos copias.
+# ------------------------------------------------------------------------------
+step_gcc_runtime() {
+    local from="${LFS_TOOLS}/${LFS_TGT}/lib64"
+    [[ -e "${from}/libgcc_s.so.1" ]] || die "no está ${from}/libgcc_s.so.1 -- corré primero: scripts/build-userspace.sh gcc2"
+    log "Runtime de GCC ${GCC_VERSION} (libstdc++, libgcc_s, libgomp) -> ${LFS_SYSROOT}/usr/lib"
+
+    local dst="${LFS_SYSROOT}/usr/lib" real
+    install -m 0755 "${from}/libgcc_s.so.1" "${dst}/libgcc_s.so.1"
+    for soname in libstdc++.so.6 libgomp.so.1; do
+        real="$(readlink "${from}/${soname}")"
+        install -m 0755 "${from}/${real}" "${dst}/${real}"
+        ln -sf "${real}" "${dst}/${soname}"
+    done
+
+    rm -f "${LFS_SYSROOT}"/usr/lib64/libstdc++*
+    rmdir "${LFS_SYSROOT}/usr/lib64" 2>/dev/null || true
+
+    log "libstdc++.so.6, libgcc_s.so.1 y libgomp.so.1 instaladas en ${dst}"
+}
+
+step_verify_gcc_runtime() {
+    log "Verificación: runtime de GCC en el sysroot"
+    local ok=1 p
+    for p in libstdc++.so.6 libgcc_s.so.1 libgomp.so.1; do
+        if [[ -e "${LFS_SYSROOT}/usr/lib/${p}" ]]; then echo "  [OK] ${LFS_SYSROOT}/usr/lib/${p}"; else echo "  [FALTA] ${LFS_SYSROOT}/usr/lib/${p}"; ok=0; fi
+    done
+    [[ "${ok}" -eq 1 ]] || die "falta runtime de GCC en el sysroot"
+    log "OK: runtime de GCC completo en el sysroot."
 }
 
 # ------------------------------------------------------------------------------
@@ -901,6 +955,8 @@ main() {
         verify-binutils2)   step_verify_binutils2 ;;
         gcc2)               step_gcc2 ;;
         verify-gcc2)        step_verify_gcc2 ;;
+        gcc-runtime)        step_gcc_runtime ;;
+        verify-gcc-runtime) step_verify_gcc_runtime ;;
         attr)               step_attr ;;
         acl)                step_acl ;;
         libcap)              step_libcap ;;
@@ -923,6 +979,8 @@ main() {
             step_verify_binutils2
             step_gcc2
             step_verify_gcc2
+            step_gcc_runtime
+            step_verify_gcc_runtime
             step_attr
             step_acl
             step_libcap
@@ -939,7 +997,7 @@ main() {
             log "Fase 2 completa: glibc + libstdc++ + binutils pass2 + GCC pass2 + attr/acl/libcap/util-linux + systemd + ncurses + Zsh + uutils listos en el sysroot."
             ;;
         *)
-            die "target desconocido: ${target} (usar: glibc|verify|libstdcxx|verify-cxx|binutils2|verify-binutils2|gcc2|verify-gcc2|attr|acl|libcap|util-linux|verify-libs|systemd|verify-systemd|ncurses|verify-ncurses|zsh|verify-zsh|uutils|verify-uutils|all)"
+            die "target desconocido: ${target} (usar: glibc|verify|libstdcxx|verify-cxx|binutils2|verify-binutils2|gcc2|verify-gcc2|gcc-runtime|verify-gcc-runtime|attr|acl|libcap|util-linux|verify-libs|systemd|verify-systemd|ncurses|verify-ncurses|zsh|verify-zsh|uutils|verify-uutils|all)"
             ;;
     esac
 }

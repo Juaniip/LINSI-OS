@@ -301,8 +301,12 @@ step_libffi() {
     # porque haga falta acá. libffi expone exactamente un flag para apagar
     # esa lógica: --disable-multi-os-directory. Con eso, toolexeclibdir cae
     # recién ahí a "${libdir}" de verdad -- por eso --libdir=/usr/lib solo
-    # (sin este flag) no alcanzaba. Limpieza del intento anterior por las dudas.
-    rm -rf "${LFS_SYSROOT}/usr/lib64"
+    # (sin este flag) no alcanzaba.
+    #
+    # SACADO (2026-10-22): acá había un "rm -rf ${LFS_SYSROOT}/usr/lib64"
+    # "por las dudas". Borraba el directorio ENTERO -- incluida la libstdc++
+    # que Fase 2 instalaba ahí por el mismo motivo multilib -- y dejó al
+    # sysroot sin runtime de C++. Ver step_libstdcxx en build-userspace.sh.
 
     ../configure \
         --host="${LFS_TGT}" \
@@ -1482,6 +1486,39 @@ step_libxkbcommon() {
 
     local nativefile="${LFS_BUILD}/meson-native-linsi.ini"
     write_meson_nativefile "${nativefile}"
+
+    # Bug real (2026-10-22, escaneo de .rodata de todos los ELF del sysroot):
+    # libxkbcommon/libxkbregistry tenían compiladas "/lfs/usr/share/X11/xkb",
+    # "/lfs/usr/share/xkeyboard-config-2" y "...-2.d" como rutas de datos de
+    # teclado -- las saca de pkg-config de xkeyboard-config, que con el
+    # sys_root del cross-file vuelve con el sysroot adentro. En el sistema
+    # real NO cargaría ningún layout (kwin depende de esto). Hay opciones
+    # para 3 de las rutas, pero la raíz "legacy" (xkb_base) no tiene
+    # override, así que se le saca el sys_root a las cuatro en el meson.build
+    # mismo, justo antes de usarlas. Idempotente: el source se extrae una
+    # sola vez.
+    if ! grep -q "LINSI-OS: sin sysroot" "${src}/meson.build"; then
+        python3 - "${src}/meson.build" <<'PYEOF'
+import sys
+path = sys.argv[1]
+anchor = "# The XKB config root for libxkbcommon\n"
+content = open(path, encoding="utf-8").read()
+if content.count(anchor) != 1:
+    sys.exit(f"ERROR: ancla no encontrada (o repetida) en {path}")
+block = (
+    "# LINSI-OS: sin sysroot en las rutas que se compilan en la librería.\n"
+    "_sysroot = meson.get_external_property('sys_root', '')\n"
+    "if _sysroot != ''\n"
+    "    XKB_LEGACY_ROOT = XKB_LEGACY_ROOT.replace(_sysroot, '')\n"
+    "    XKEYBOARD_CONFIG_ROOT = XKEYBOARD_CONFIG_ROOT.replace(_sysroot, '')\n"
+    "    XKEYBOARD_CONFIG_VERSIONED_EXTENSIONS_PATH = XKEYBOARD_CONFIG_VERSIONED_EXTENSIONS_PATH.replace(_sysroot, '')\n"
+    "    XKEYBOARD_CONFIG_UNVERSIONED_EXTENSIONS_PATH = XKEYBOARD_CONFIG_UNVERSIONED_EXTENSIONS_PATH.replace(_sysroot, '')\n"
+    "endif\n\n"
+)
+open(path, "w", encoding="utf-8").write(content.replace(anchor, block + anchor))
+print(f"OK: {path} parcheado")
+PYEOF
+    fi
 
     local bdir="${src}/build"
     rm -rf "${bdir}"

@@ -748,6 +748,13 @@ step_lvm2() {
     local src="${LFS_BUILD}/LVM2.${LVM2_VERSION}"
     cd "${src}"
 
+    # --with-systemd-run (bug real encontrado 2026-10-22 con
+    # scripts/check-sysroot.sh): sin esto configure hace
+    # AC_PATH_TOOL(systemd-run) y lo encuentra en ${LFS_SYSROOT}/usr/bin (env.sh
+    # agrega el sysroot al PATH), así que la regla udev 69-dm-lvm.rules
+    # quedaba llamando a "/lfs/usr/bin/systemd-run" -- inexistente en el
+    # sistema real (la autoactivación de LVM fallaría). Mismo caso que
+    # MODPROBE_CMD de abajo.
     PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig" \
     PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
     ./configure \
@@ -760,7 +767,15 @@ step_lvm2() {
         --disable-dmeventd \
         --disable-selinux \
         --disable-readline \
+        --with-systemd-run=/usr/bin/systemd-run \
         ac_cv_path_MODPROBE_CMD=/usr/sbin/modprobe
+
+    # Las reglas udev se generan desde *.rules.in en el make; si ya existen de
+    # una corrida anterior (build en el árbol de fuentes) make las da por
+    # actualizadas y no toma el SYSTEMD_RUN_CMD nuevo -- confirmado en el
+    # segundo intento: config.log ya decía /usr/bin/systemd-run pero
+    # 69-dm-lvm.rules seguía con /lfs/usr/bin/systemd-run.
+    rm -f udev/*.rules
 
     make ${MAKEFLAGS} \
         CC="${LFS_TGT}-gcc" \
