@@ -65,10 +65,8 @@ Plan con tres partes, sólo la primera corre dentro del contenedor de build
   con el hostname real pendiente — se actualiza recién cuando el repo de la Pi
   esté confirmado andando de verdad desde afuera (`curl -I
   https://tu-hostname/edge/main/x86_64/` devolviendo 200).
-- **`.github/workflows/lint-scripts.yml` rechazado al escribir.** Las
-  herramientas remotas no pueden tocar `.github/` (protección esperada) — te
-  lo entregué en el chat, pendiente que lo copies vos a mano a
-  `linsi-os\.github\workflows\lint-scripts.yml`.
+- ~~`.github/workflows/lint-scripts.yml` rechazado al escribir~~ —
+  resuelto: el archivo ya está en el repo (confirmado 2026-10-22).
 - **(c) CI/CD — criterio de cadencia decidido (2026-09-30), runner sin
   decidir todavía.** Dos triggers, no uno solo:
   1. **On-push** — cualquier commit que toque `scripts/*.sh` o `env.sh`
@@ -3041,10 +3039,210 @@ confirmado con `find` real). Verify real, corrido y en verde:
 `plasmashell`, `krunner`, `plasma_session`, `startplasma-wayland` (en
 `bin/`) + `ksmserver-logout-greeter` (en `lib/libexec/`).
 
-**Con esto, Fase 6 Parte 3 (Qt6 + KDE Frameworks/Plasma) queda
-COMPLETA.**
+**Con esto queda compilado el núcleo de Plasma** (corregido 2026-10-22:
+acá decía "Fase 6 Parte 3 COMPLETA", pero `plasma-workspace` solo no da un
+escritorio usable — ver la sección siguiente).
 
-## Fase 6 — Parte 3 (Qt6 + KDE Frameworks/Plasma) — 🟡 arrancada 2026-09-04
+## Escritorio usable (Fase 6 Parte 3, continuación) — 🟡 en curso desde 2026-10-22
+
+Al revisar qué faltaba (2026-10-22) se confirmó con `grep` que
+`build-kde.sh` no tiene ningún paso para los componentes de Plasma que
+están por encima de `plasma-workspace`: el paquete de escritorio, un login
+manager, `systemsettings`, los applets de red y audio, ni aplicaciones base.
+Tampoco se compilaron las dependencias opcionales que la decisión "alcance:
+todo desde el principio" (2026-09-04) incluía: Baloo, PackageKitQt6,
+AppStreamQt, KIOExtras/KIOFuse, libei, AccountsService,
+QAccessibilityClient6, KExiv2Qt6, Union. Decisión de Juani (2026-10-22):
+completar el escritorio antes del primer arranque de prueba en QEMU.
+
+### Research (2026-10-22) contra los `CMakeLists.txt` reales de Plasma 6.7.4
+
+Lista de tarballs confirmada contra `download.kde.org/stable/plasma/6.7.4/`.
+**`plasma-login-manager` sale como parte de Plasma 6.7.4** — no hace falta
+SDDM aparte. Los 15 paquetes del núcleo del escritorio se bajaron y se
+leyeron dentro del contenedor (`/lfs/build/research-desktop/`), no con
+WebFetch: un primer pase con WebFetch resumía con un modelo chico y perdía
+el anidamiento de los `if()`, así que todo lo condicional se verificó
+leyendo el archivo real.
+
+**Se resuelve con opciones oficiales, sin parches:**
+- `kscreen` y `plasma5support`: `WITH_X11=OFF`.
+- `plasma-nm`: Qt WebEngine (Chromium entero) sólo se pide con
+  `BUILD_OPENCONNECT=ON` — se apaga.
+- `plasma-desktop`: `BUILD_KCM_MOUSE_X11=OFF` / `BUILD_KCM_TOUCHPAD_X11=OFF`
+  (esos backends piden headers de drivers del servidor X, `xorg-libinput`).
+- `powerdevil`: pide `XCB RANDR DPMS` REQUIRED, pero los da la libxcb que
+  ya está en el sysroot.
+- `plasma-login-manager`: pide `xau` (ya en el sysroot), PAM y systemd.
+
+**Tres decisiones tomadas con Juani:**
+1. **plasma-desktop exige libX11** (`set_package_properties(X11 ... TYPE
+   REQUIRED)` sin condición) y `XCB REQUIRED COMPONENTS XCB SHM IMAGE`. El
+   KCM de distribución de teclado y `kaccess` ya están detrás de
+   `if(X11_Xkb_FOUND AND XCB_XKB_FOUND)`.
+   - **Primera decisión (revertida):** compilar libX11 + libxkbfile sólo
+     como librerías cliente, para tener el KCM de teclado. Se compilaron
+     (ver "Progreso real") y recién después, al leer el código real del
+     KCM, apareció que tampoco alcanzaba: `kcms/keyboard` usa
+     `QX11Info::display()` / `qtx11extras_p.h` (sólo existe con **Qt6
+     compilado con la plataforma xcb**) y `KX11Extras`/`KWindowInfo` (sólo
+     con **KWindowSystem compilado con X11**). Tenerlo exigía meter soporte
+     X11 real en Qt — mucho más que "librerías cliente". Error de
+     planificación propio: la opción se ofreció sin haber leído el código
+     del KCM.
+   - **Decisión final (Juani, 2026-10-22), por la filosofía del sistema:
+     parchear, Wayland puro.** El documento fundacional lo dice explícito
+     (Pilar 5: "se construye exclusivamente sobre Wayland"; sección 6:
+     "sin arrastrar compatibilidad con X11"); además Seguridad (menos
+     superficie) y Robustez (~15 paquetes menos). Sin KCM gráfico de
+     teclado: el layout queda fijo en `/etc/skel` (`kxkbrc`) y kwin lo
+     aplica en Wayland. libX11/libxkbfile/xtrans se sacaron del sysroot
+     (`make uninstall` / `ninja uninstall`, más los `.so` de libX11 a mano
+     porque el step borra los `.la` y libtool los necesita para
+     desinstalar) y del script. xcb-util + xcb-util-image se quedan: `XCB
+     IMAGE` sigue siendo REQUIRED.
+2. **plasma-pa exige `libpulse` y `libpulse-mainloop-glib`.** Decisión:
+   compilar PulseAudio **sólo como librería cliente, con el daemon
+   apagado**. Habla con el `pipewire-pulse` que ya está; no hay servidor
+   PulseAudio en el sistema (el pilar "sin PulseAudio" se refiere al
+   servidor). Además pide `KF6PulseAudioQt` (pulseaudio-qt).
+3. **plasma-nm exige `ModemManagerQt`** sin condición, y los 23 archivos
+   que lo usan no tienen ningún guard. Decisión: **compilar ModemManager
+   mínimo + ModemManagerQt** (mismo enfoque que NetworkManager), sin parches.
+
+**Dependencias nuevas detectadas:** frameworks KF6 knotifyconfig,
+kunitconversion, qqc2-desktop-style y modemmanager-qt; terceros
+pulseaudio-qt, qtkeychain, libpulse (+ libsndfile), ModemManager,
+xcb-util-image, y xdg-desktop-portal (runtime de xdg-desktop-portal-kde).
+Konsole y Dolphin salen de KDE Gear (otro tren de versiones) — research
+aparte.
+
+### Progreso real (2026-10-22)
+
+- **xcb-util 0.4.1 + xcb-util-image 0.4.1 — ✅ a la primera** (últimas en
+  `xorg.freedesktop.org/archive/individual/xcb/`). libX11 1.8.14,
+  libxkbfile 1.2.0 y xtrans 1.6.0 también compilaron a la primera, pero se
+  descartaron (ver decisión 1). Mientras estuvieron en el sysroot, los
+  helpers pasaban `-DCMAKE_DISABLE_FIND_PACKAGE_X11=ON` para que ningún
+  `find_package(X11)` opcional las tomara solo (los tres frameworks de
+  abajo se compilaron así); al sacarlas, el flag se quitó.
+- **Frameworks KF6 — ✅ a la primera:** knotifyconfig, kunitconversion,
+  qqc2-desktop-style (plugin `org.kde.desktop` en
+  `usr/lib/plugins/kf6/kirigami/platform/`).
+- **Bug del doble sysroot (`/lfs/lfs`) — dos casos más encontrados y
+  corregidos.** Al revisar los logs de TODO el proyecto (`grep -l
+  "/lfs/lfs/" logs/*.log`) aparecieron, además de los cuatro de
+  `build-desktop.sh` ya corregidos el 2026-09-30:
+  - **libcanberra**: 3 `.service` de systemd perdidos (ya figuraba como
+    "nota menor" más abajo, pendiente). Fix: `--with-systemdsystemunitdir`.
+  - **NetworkManager**: 4 unidades systemd (`NetworkManager.service`,
+    `-dispatcher`, `-wait-online`, `nm-priv-helper`) y su política de
+    polkit, perdidas desde el 2026-09-16. El cross-file de Meson de
+    `build-kde.sh` tiene `sys_root`, y Meson con eso setea
+    `PKG_CONFIG_SYSROOT_DIR` solo — misma causa raíz. Fix:
+    `-Dsystemdsystemunitdir=` para las unidades; la política de polkit no
+    tiene opción de override (`meson.build` línea 506), así que se agregó
+    `merge_doubled_sysroot()` (mueve lo que haya caído en `/lfs/lfs` al
+    sysroot real y deja en el log qué movió).
+  - Los verifies de los dos ahora chequean esos archivos — que ningún
+    verify los mirara es justamente lo que dejó pasar el bug semanas.
+- **Terceros para plasma-pa/plasma-nm — ✅ todos compilados y verificados:**
+  qtkeychain 0.17.0 (a la primera), pulseaudio-qt 1.9.0, libpulse 17.0
+  (sólo cliente; el verify confirma que NO se instaló el daemon),
+  libsndfile 1.2.2, ModemManager 1.24.2 (mínimo) y modemmanager-qt.
+  Dos errores reales en el primer intento:
+  - **libsndfile**: `Compatibility with CMake < 3.5 has been removed from
+    CMake` (línea 1 de su `CMakeLists.txt`) — mismo caso que libqrencode,
+    mismo fix: `-DCMAKE_POLICY_VERSION_MINIMUM=3.5`.
+  - **ModemManager**: `Assert failed: udevdir must be explicitly given if
+    udev support is disabled` (`meson.build` línea 199) — fix:
+    `-Dudevdir=/usr/lib/udev`. `udev=false` porque con udev pide libgudev,
+    que no está; consecuencia: el daemon no detecta módems por hotplug (en
+    el laboratorio no hay).
+  - En ModemManager, `merge_doubled_sysroot` movió sólo la política de
+    polkit (`org.freedesktop.ModemManager1.policy`) — lo esperado, es lo
+    único sin opción de override.
+- **Red de seguridad agregada:** nueve paquetes de Plasma leen rutas de
+  systemd con `pkg_get_variable()` (polkit-kde-agent-1, kscreen,
+  plasma-login-manager, kactivitymanagerd, xdg-desktop-portal-kde,
+  powerdevil, plasma-desktop/kaccess…). `_kf6_cmake_build()` y
+  `_plasma_cmake_build()` llaman a `merge_doubled_sysroot` después de
+  instalar, así lo que caiga en `/lfs/lfs` se mueve y queda en el log.
+- **Paquetes de Plasma 6.7.4 — 14 de 15 ✅ compilados y verificados:**
+  plasma5support, kactivitymanagerd, qqc2-breeze-style, plasma-integration,
+  **plasma-desktop** (shell `org.kde.plasma.desktop`), systemsettings,
+  kde-cli-tools, polkit-kde-agent-1, milou, kscreen, powerdevil, plasma-nm,
+  plasma-pa y **plasma-login-manager** (`plasmalogin.service`). Falta
+  xdg-desktop-portal-kde (ver más abajo). Errores reales y fixes, en orden:
+  - **Mismo bug sistémico de X11 de siempre** (include X11-only sin guard,
+    uso detrás de un chequeo de runtime) en polkit-kde-agent-1
+    (`policykitlistener.cpp`), kscreen (`osd/osd.cpp`), plasma-nm
+    (`libs/handler.cpp`, `kded/secretagent.cpp`, `kded/pindialog.cpp`) y
+    powerdevil (`kwinkscreenhelpereffect.cpp`, `actions/bundled/dpms.cpp` —
+    acá además `HAVE_XCB` sale de `XCB_FOUND` pero el código usa
+    `QX11Info`, que necesita Qt con xcb: se fuerza `HAVE_XCB 0` y en
+    `dpms.cpp` queda sólo la rama de Wayland). Parches agrupados en
+    `_apply_x11_patches()`.
+  - **plasma-integration**: `BUILD_QT5=OFF` (default ON, pediría Qt5
+    entero); X11 `TYPE REQUIRED` → OPTIONAL; `XCB::XCB` linkeado sin usarse
+    (el plugin lo carga cualquier app Qt, no tiene que arrastrar libxcb);
+    `x11integration.cpp` se compilaba siempre (incluye `<NETWM>`) — sale
+    del build y el miembro `QScopedPointer<X11Integration>` queda detrás del
+    mismo `HAVE_X11` que su instanciación.
+  - **plasma-desktop** (5 rondas): X11 `TYPE REQUIRED` → OPTIONAL;
+    `find_package(KSMServerDBusInterface CONFIG REQUIRED)` vestigial
+    (plasma-workspace sólo compila ksmserver con `WITH_X11`, y nada en
+    plasma-desktop usa esa variable); 4 includes X11 muertos
+    (`KKeyServer`, `KWindowInfo`, `netwm.h`, `fixx11h.h`); `XKBDIR` de
+    pkg-config con el sysroot adentro Y compilado en el binario — se le saca
+    el prefijo; la comprobación de esa ruta además falla porque
+    xkeyboard-config 2.48 instala `X11/xkb` como symlink ABSOLUTO a
+    `/usr/share/xkeyboard-config-2` (bien en el sistema real, colgado en el
+    sysroot) — se acepta el symlink; y un bug de upstream:
+    `ConfigureChecks.cmake` usa `check_function_exists`/`check_include_files`
+    sin incluir sus módulos.
+  - **plasma-desktop pedía un XML de kwin roto:** `qdbusxml2cpp` rechazó
+    `org.kde.kwin.InputDevice.xml` (7 propiedades con `type=""`). Causa
+    raíz: la QtDBus NATIVA (la de `qdbuscpp2xml`, que genera ese XML en el
+    build de kwin) carga `libdbus-1.so.3` en runtime para calcular firmas
+    de tipos compuestos (`QRectF`, `QSizeF`, `QList<uint>`) y el contenedor
+    no la tenía — devuelve firma vacía sin avisar. Fix durable:
+    `libdbus-1-3` al Dockerfile (ítem 15) + imagen reconstruida + kwin
+    recompilado (el XML quedó con 0 propiedades vacías). Era el único XML
+    instalado con el problema (`grep -l 'type=""'`).
+  - **kactivitymanagerd**: `find_package(Boost 1.58 REQUIRED)` — sólo usa
+    `boost/range` (header-only): se copian los headers de Boost 1.92.0 al
+    sysroot (`step_boost_headers`).
+  - **plasma-login-manager**: elige su plantilla PAM leyendo
+    `/etc/os-release` (no existe en el sysroot) — `-DPAM_OS_CONFIGURATION=debian`,
+    porque la cadena PAM de Fase 4 ya es estilo Debian (`common-*`), así
+    que hereda sola faillock + FIDO2. El greeter linkeaba `X11::X11` sin
+    usar Xlib — se saca el link.
+  - **plasma-pa** compiló a la primera; el que fallaba era el verify:
+    `find ... | head -n1` con `set -o pipefail` — con muchas coincidencias
+    (los `.mo`), `head` cierra el pipe, `find` muere con SIGPIPE y
+    `pipefail` mata el script en silencio. Todos los verifies nuevos pasaron
+    a `find ... -print -quit`.
+- **Pendiente — xdg-desktop-portal-kde:** su `print.cpp` usa
+  `QtPrintSupport/private/qcups_p.h` (`QCUPSSupport`) sin condición, y el
+  Qt6 de este proyecto se compiló sin CUPS. De fondo: **no hay soporte de
+  impresión en todo el sistema** (Qt sin CUPS sólo imprime a PDF). Decisión
+  pendiente con Juani: agregar CUPS (libcups + daemon + recompilar qtbase
+  con cups) o parchear el portal para imprimir sólo a archivo. El portal
+  sirve sobre todo para apps sandbox (Flatpak, Fase 7); el escritorio
+  nativo no lo necesita para arrancar.
+- **Otros pendientes del escritorio:** kpipewire (módulo QML
+  `org.kde.pipewire`, RUNTIME de plasma-desktop: miniaturas de ventanas en
+  el taskmanager bajo Wayland), layout de teclado fijo + tema oscuro + Nerd
+  Fonts en `/etc/skel`, Konsole y Dolphin (KDE Gear), y las dependencias
+  opcionales de la decisión "alcance: todo" (Baloo, PackageKitQt6,
+  AppStreamQt, KIOExtras/KIOFuse, libei, AccountsService,
+  QAccessibilityClient6, KExiv2Qt6, Union).
+- **Refactor sin cambio de comportamiento:** las reglas ITS de gettext para
+  `.policy` de polkit (fix real de NetworkManager) pasaron a un helper,
+  `install_polkit_its_rules()`, porque ModemManager necesita lo mismo.
+
+## Fase 6 — Parte 3 (Qt6 + KDE Frameworks/Plasma) — 🟡 núcleo compilado (2026-09-17), escritorio usable en curso (2026-10-22)
 
 Prerequisito de xkbregistry ya cumplido (ver más abajo). El trabajo real de
 Parte 3 (Qt6/KF6/kwin/plasma-workspace en sí) arrancó el mismo día: research
@@ -3329,6 +3527,79 @@ fase). Resumen por tier:
     antes de escribir nada, mismo criterio que se usó para Mesa.
 
 ## Infraestructura de build
+
+- **BUG REAL CRÍTICO encontrado y corregido (2026-10-22): el sysroot no
+  tenía el runtime de C++/GCC — ningún programa C++ del sistema hubiera
+  arrancado.** Apareció al recompilar libxkbcommon: dos binarios suyos
+  fallaron al linkear contra `libicuuc.so` con `undefined reference to
+  __gxx_personality_v0@CXXABI_1.3` — el linker no encontraba la libstdc++
+  que `libicuuc.so` pide como NEEDED. Un chequeo de clausura (cada NEEDED
+  de cada ELF del sysroot tiene que existir en el sysroot) confirmó:
+  `libstdc++.so.6` faltaba para **848 binarios**, `libgcc_s.so.1` para
+  **845** y `libgomp.so.1` para 30. Todo lo demás resolvía.
+  - **Causa raíz de libstdc++ (confirmada en el log real de Fase 2,
+    `logs/20260902-041334_build-userspace_all.log`):** `step_libstdcxx` sí
+    la instalaba, pero en `/lfs/usr/lib/../lib64` — su configure le
+    pregunta el directorio al cross-gcc con `-print-multi-os-directory`,
+    que devuelve `../lib64` (toolchain multilib). Y ese `lib64` lo borraban
+    ENTERO dos `rm -rf "${LFS_SYSROOT}/usr/lib64"` puestos "por las dudas"
+    para limpiar restos de OpenSSL (`build-comms.sh`, Fase 4) y de libffi
+    (`build-desktop.sh`, Fase 6 P1). El verify de Fase 2 nunca lo vio:
+    `g++` linkea contra la libstdc++ del **toolchain**
+    (`/lfs/tools/x86_64-linsi-linux-gnu/lib64`), no la del sysroot.
+  - **libgcc_s/libgomp nunca llegaron:** GCC pass 2 se instala con
+    `--prefix=${LFS_TOOLS}`, así que sus librerías de runtime del target
+    sólo existían en el toolchain.
+  - **Fix:** paso nuevo `gcc-runtime` en `build-userspace.sh` (después de
+    `gcc2`) que copia las versiones FINALES de `libstdc++.so.6`,
+    `libgcc_s.so.1` y `libgomp.so.1` (las que compila GCC pass 2) del
+    toolchain a `/usr/lib`, junto a glibc, y borra la libstdc++ de
+    bootstrap de `/usr/lib64` para que no queden dos copias. Se sacaron los
+    dos `rm -rf lib64` (los `--libdir`/`--disable-multi-os-directory` de
+    OpenSSL y libffi ya evitan que caigan ahí).
+  - **Primer intento descartado:** pasarle `--with-toolexeclibdir=/usr/lib`
+    a `step_libstdcxx` y recompilarla. Falló (`tzdb.cc: 'mutex' does not
+    name a type`) porque ese paso es la libstdc++ de BOOTSTRAP, pensada
+    para el GCC pass1; recompilarla hoy, con pass 2 en el toolchain, no es
+    su condición original. Además la libstdc++ final ya existía (la de
+    pass 2) — se volvió `step_libstdcxx` a su versión validada.
+- **Rutas del sysroot compiladas en binarios (2026-10-22).** Escaneando la
+  sección `.rodata` de los 1944 ELF del sysroot aparecieron rutas con
+  `/lfs` que en el sistema real no existen — misma causa raíz que
+  `/lfs/lfs` (variables de pkg-config que vuelven con el sysroot adentro, o
+  `AC_PATH_TOOL` encontrando binarios del sysroot por el PATH que arma
+  `env.sh`), pero acá quedan COMPILADAS, no en una ruta de instalación:
+  - **libxkbcommon/libxkbregistry** (`/lfs/usr/share/X11/xkb`,
+    `/lfs/usr/share/xkeyboard-config-2`): en el sistema real no hubiera
+    cargado NINGÚN layout de teclado (kwin depende de esto). Fix: bloque en
+    su `meson.build` que le saca el `sys_root` a las cuatro rutas antes de
+    usarlas (la raíz "legacy" no tiene opción de override).
+  - **kded6** (`/lfs/usr/lib/libexec/kf6/kconf_update`, vía
+    `$<TARGET_FILE:KF6::kconf_update>`): no hubiera migrado configuración
+    de usuario. Fix: `${KDE_INSTALL_FULL_LIBEXECDIR_KF}/kconf_update`.
+  - **ki18n** (`ISO_CODES_PREFIX "/lfs/usr"`, de `FindIsoCodes` de ECM):
+    sin nombres de países/regiones. Fix: se le saca el prefijo del sysroot
+    a `IsoCodes_PREFIX` después del `find_package`.
+  - **LVM2** (regla udev `69-dm-lvm.rules` llamando a
+    `/lfs/usr/bin/systemd-run`): la autoactivación de LVM hubiera fallado.
+    Fix: `--with-systemd-run=/usr/bin/systemd-run`.
+  - Los hits restantes (`/lfs/usr/include/...` en wireplumber y
+    QtQuickTest) son `__FILE__` en mensajes de diagnóstico: inofensivos.
+- **`scripts/check-sysroot.sh` (nuevo):** corre los dos chequeos (clausura de
+  librerías + rutas `/lfs` en `.rodata` y en archivos de runtime) sobre
+  todo el sysroot y sale con error si encuentra algo. Conviene correrlo
+  después de cualquier tanda de builds — los verifies por paso no ven
+  ninguno de estos dos problemas.
+- **Pendiente para Fase 8 (anotado, no se puede arreglar en el sysroot):**
+  todos los ELF piden como intérprete `/lib64/ld-linux-x86-64.so.2`, pero
+  en el sysroot el loader está en `/usr/lib/ld-linux-x86-64.so.2` y no
+  existen `/lib64`, `/lib`, `/bin` ni `/sbin` (fuera de `/lfs/usr`, `/lfs/etc`
+  y `/lfs/boot` nada persiste entre corridas). El rootfs de la imagen final
+  tiene que crear los symlinks "usrmerge" (`/lib64 -> usr/lib`, `/lib ->
+  usr/lib`, `/bin -> usr/bin`, `/sbin -> usr/bin`) — sin `/lib64` no
+  arranca NINGÚN binario dinámico. Lo mismo para `/etc/os-release`, que no
+  existe en el sysroot (plasma-login-manager lo leía para elegir su
+  plantilla PAM).
 
 - **BUG REAL GRAVE encontrado y resuelto (2026-09-30): `/lfs/etc` nunca tuvo
   volumen persistente — cualquier config real se perdía entre corridas

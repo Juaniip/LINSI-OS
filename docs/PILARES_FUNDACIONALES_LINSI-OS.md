@@ -107,7 +107,7 @@ descartando código heredado y obsoleto.
 
 ---
 
-## Nota de estado (situación real al 2026-09-15)
+## Nota de estado (situación real al 2026-10-22)
 
 Para que este documento no quede desactualizado respecto de lo que
 efectivamente se construyó, un mapeo rápido pilar por pilar contra el avance
@@ -115,8 +115,9 @@ real (ver `PENDIENTES.md` para el detalle completo):
 
 - **Seguridad:** Fases 1, 2 y 3 completas y confirmadas (Lockdown, KASLR,
   uutils, SELinux, nftables, auditd). Secure Boot real (enrolado de clave)
-  queda para la Fase 8, todavía no llegamos ahí. Fase 5 (firma de paquetes)
-  escrita pero sin confirmar ejecutada. Wayland (Fase 6 Parte 1) completo;
+  queda para la Fase 8, todavía no llegamos ahí. Fase 5: `apk-tools` y la
+  firma RSA-4096 del repositorio compilados y confirmados (2026-09-30), con
+  la llave privada fuera del sysroot a propósito. Wayland (Fase 6 Parte 1) completo;
   **el pilar Wayland-puro se sostuvo activamente incluso frente a bugs
   reales de KDE que asumían X11 disponible** (ver Fase 6 Parte 3 abajo);
   Flatpak (Fase 7) no empezado.
@@ -129,20 +130,21 @@ real (ver `PENDIENTES.md` para el detalle completo):
   sigue sin confirmación real de estar levantada.
 - **Estética:** todavía no se llegó a Zsh+Starship (Fase 2 se compiló con
   Zsh pero sin Starship configurado explícitamente) ni a Calamares (Fase 8,
-  no empezada), pero **KDE Plasma 6 (Fase 6 Parte 3) está en construcción
-  activa**: Qt6 completo, KDE Frameworks 6 completo (incluyendo KIO y
-  knewstuff), y del "tren de Plasma" ya están `libplasma`,
-  `PlasmaActivities`/`PlasmaActivitiesStats` compilados y verificados.
-  Falta el resto del tren de Plasma (KWayland, KSysGuard, KDecoration3,
-  etc.) y después kwin/plasma-workspace en sí. La base de aceleración de
-  hardware real vía Mesa/Vulkan para Intel/AMD/Nvidia (Fase 6 Parte 2) ya
-  está completa desde antes.
+  no empezada). **De KDE Plasma 6 (Fase 6 Parte 3) ya está compilado el
+  núcleo**: Qt6, KDE Frameworks 6, el tren de Plasma completo, el
+  compositor `kwin` y `plasma-workspace` (`plasmashell`,
+  `startplasma-wayland`). Faltan los componentes que hacen al escritorio
+  usable (paquete de escritorio, gestor de inicio de sesión, configuración
+  del sistema, aplicaciones base) y el tema oscuro + Nerd Fonts en
+  `/etc/skel`. Nada se arrancó todavía en una máquina real ni virtual. La
+  base de aceleración de hardware vía Mesa/Vulkan para Intel/AMD/Nvidia
+  (Fase 6 Parte 2) está completa.
 - **Vanguardia:** PAM+FIDO2 completo y confirmado (Fase 4). Wayland+PipeWire
   (Fase 6 Parte 1) y Mesa/Vulkan (Fase 6 Parte 2) completos y confirmados.
   El modelo Flatpak/Podman/Distrobox de Fase 7 no empezó.
 
 En resumen: los pilares de Seguridad, Privacidad y Robustez tienen ya su
 base técnica más sólida construida; Estética y Vanguardia tienen la base
-gráfica (Wayland + Mesa/Vulkan) completa y están construyendo activamente
-el escritorio en sí (Fase 6 Parte 3, Qt6/KDE Frameworks completos, tren de
-Plasma en progreso) — ver `PENDIENTES.md` para el detalle tier por tier.
+gráfica (Wayland + Mesa/Vulkan) y el núcleo de Plasma 6 compilados, y les
+falta completar el escritorio usable y probarlo arrancando — ver
+`PENDIENTES.md` para el detalle tier por tier.

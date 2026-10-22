@@ -36,8 +36,19 @@ El build es cross-compilado dentro de contenedores Podman (triplet
 ## Estado actual (resumen — el detalle real vive en `docs/PENDIENTES.md`)
 
 Fases 0 a 4 (toolchain, kernel, espacio de usuario, seguridad,
-comunicaciones) y 6 completas (fundación gráfica no-KDE, Mesa+LLVM, Qt6 +
-KDE Frameworks/Plasma, cerrada 2026-09-17). **Fase 5 (infraestructura
+comunicaciones) completas. Fase 6: Partes 1 y 2 completas; de la Parte 3
+está compilado el núcleo de Plasma (Qt6, KF6, kwin, plasma-workspace,
+2026-09-17) y, desde 2026-10-22, el escritorio en sí: plasma-desktop,
+plasma-login-manager, systemsettings, plasma-nm/plasma-pa, powerdevil,
+kscreen, etc. (14 de 15 paquetes; falta xdg-desktop-portal-kde por la
+decisión de impresión/CUPS). Wayland puro sostenido (sin libX11, sin KCM
+de teclado — el layout va fijo en `/etc/skel`). Faltan Konsole/Dolphin,
+kpipewire, `/etc/skel` (layout, tema oscuro, Nerd Fonts). Nada se arrancó
+todavía en una máquina real ni en QEMU — **antes de eso, correr
+`scripts/check-sysroot.sh`**: el 2026-10-22 encontró que faltaba el
+runtime de C++ (libstdc++/libgcc_s/libgomp, ningún programa C++ hubiera
+arrancado) y rutas `/lfs` compiladas en libxkbcommon/kded/ki18n/LVM2; hoy
+da 0 problemas. **Fase 5 (infraestructura
 autónoma) parcial:** parte (a) — apk-tools + firma — confirmada recién
 (2026-09-30, ver más abajo); partes (b) servidor de repo en la Raspberry
 Pi y (c) CI/CD siguen pendientes (ver `docs/PENDIENTES.md`). Fase 6 Parte
@@ -119,8 +130,9 @@ compilación de una sola pasada) en vez del loop de a un error por vez.
 **Build final limpio, 0 errores, verify real en verde**
 (`plasmashell`/`krunner`/`plasma_session`/`startplasma-wayland`/
 `ksmserver-logout-greeter` -- Plasma 6 no instala un `ksmserver`
-standalone). **Con esto, Fase 6 Parte 3 (Qt6 + KDE Frameworks/Plasma)
-queda COMPLETA.** Ver `docs/PENDIENTES.md` (sección "plasma-workspace
+standalone). Con esto queda compilado el **núcleo** de Plasma; el
+escritorio usable (plasma-desktop, login manager, etc.) se sigue en la
+sección "Escritorio usable" de `docs/PENDIENTES.md`. Ver `docs/PENDIENTES.md` (sección "plasma-workspace
 (Tier 5)") para el detalle completo de los 20 prerequisitos, los dos
 bugs de NetworkManager y el catálogo completo de los 18+ archivos con
 parches de X11.
