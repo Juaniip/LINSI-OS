@@ -231,7 +231,15 @@ step_verify_apk_signing() {
     pubcount="$(find "${LFS_SYSROOT}/etc/apk/keys" -maxdepth 1 -name '*.rsa.pub' 2>/dev/null | wc -l)"
     [[ "${pubcount}" -ge 1 ]] || die "no hay ninguna .rsa.pub en ${LFS_SYSROOT}/etc/apk/keys"
     echo "  [OK] ${pubcount} llave(s) pública(s) en ${LFS_SYSROOT}/etc/apk/keys"
-    if find "${LFS_SYSROOT}" -name '*.rsa' -not -name '*.pub' 2>/dev/null | grep -q .; then
+    # Bug real encontrado 2026-09-30: "${LFS_SYSROOT}" es literalmente "/lfs"
+    # (ver env.sh: LFS_SYSROOT="${LFS}"), así que un find sin acotar barría
+    # también "/lfs/build" -- donde la privada vive A PROPÓSITO (ver
+    # step_apk_signing más arriba) -- y disparaba un falso positivo. Lo que
+    # de verdad importa es que no se cuele en las partes que se empaquetan de
+    # verdad (etc/usr/boot), no en todo /lfs (que incluye build/sources/
+    # tools/logs, todo scratch).
+    if find "${LFS_SYSROOT}/etc" "${LFS_SYSROOT}/usr" "${LFS_SYSROOT}/boot" \
+            -name '*.rsa' -not -name '*.pub' 2>/dev/null | grep -q .; then
         die "SE COLÓ UNA LLAVE PRIVADA DENTRO DEL SYSROOT -- revisar step_apk_signing antes de seguir"
     fi
     echo "  [OK] ninguna llave privada dentro del sysroot"

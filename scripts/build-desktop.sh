@@ -455,18 +455,27 @@ step_dbus() {
     rm -rf "${bdir}"
 
     # CORREGIDO tras un build real fallido (2026-08-27): "-Dsystemdsystemunitdir="
-    # NO existe como opción de meson_options.txt de dbus -- meson tiró
-    # "ERROR: Unknown option: systemdsystemunitdir" de una. Confirmado
-    # comparando contra dos recetas reales de dbus 1.16.2 con meson (Alpine
-    # APKBUILD y Void Linux template): ninguna de las dos pasa esa opción --
-    # Alpine ni siquiera toca -Dsystemd, Void pasa "-Dsystemd=disabled" (usan
-    # elogind, no systemd) pero confirma que "-Dsystemd" SÍ es una opción
-    # real (feature bool), sin ningún override de directorio.
-    # Con -Dsystemd=enabled, dbus resuelve solo la ruta de las unidades vía
-    # pkg-config contra el "systemd.pc" real (variable "systemdsystemunitdir"
-    # que el propio systemd de Fase 4 ya instala) -- por eso agregamos acá el
-    # mismo prefijo PKG_CONFIG_LIBDIR/PKG_CONFIG_SYSROOT_DIR que ya usa
-    # step_polkit(), para que ese pkg-config apunte al sysroot y no al host.
+    # (sin guion bajo entre "systemd" y "system") NO existe como opción de
+    # meson_options.txt de dbus -- meson tiró "ERROR: Unknown option:
+    # systemdsystemunitdir" de una. En ese momento se concluyó -- INCORRECTO,
+    # ver más abajo -- que dbus no tenía ningún override de directorio.
+    #
+    # CORREGIDO otra vez (2026-09-30, re-verificación real de Fase 5): el
+    # nombre real SÍ existe, con guion bajo también entre "systemd" y
+    # "system": "systemd_system_unitdir"/"systemd_user_unitdir" (confirmado
+    # leyendo el meson_options.txt real de esta versión). Sin pasarlo, dbus
+    # resuelve la ruta vía `systemd_dirs.get_variable(pkgconfig:
+    # 'systemdsystemunitdir')` -- y como esta build setea
+    # PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" para que OTRAS dependencias
+    # (glib, etc.) resuelvan Cflags/Libs contra el sysroot, pkg-config
+    # también reescribe esta variable custom a una ruta YA absoluta con el
+    # sysroot adentro (`${LFS_SYSROOT}/usr/lib/systemd/system`) -- y después
+    # `DESTDIR="${LFS_SYSROOT}" ninja install` vuelve a prepender el sysroot
+    # sobre esa ruta ya absoluta, duplicándolo
+    # (`${LFS_SYSROOT}${LFS_SYSROOT}/usr/lib/systemd/system`, confirmado real
+    # en el log de instalación). Mismo bug de fondo, encontrado también en
+    # step_polkit()/step_pipewire()/step_wireplumber() -- fix real: pasar la
+    # ruta YA relativa a mano, sin dejar que la auto-detección la toque.
     PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig:${LFS_SYSROOT}/usr/share/pkgconfig" \
     PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
     meson setup "${bdir}" \
@@ -478,6 +487,8 @@ step_dbus() {
         -Dsystem_pid_file=/run/dbus/pid \
         -Dsystem_socket=/run/dbus/system_bus_socket \
         -Dsystemd=enabled \
+        -Dsystemd_system_unitdir=/usr/lib/systemd/system \
+        -Dsystemd_user_unitdir=/usr/lib/systemd/user \
         -Dx11_autolaunch=disabled
 
     # NOTA: no se agregan acá flags de tests/docs (-Dtests=/-Ddoxygen_docs=/
@@ -643,6 +654,14 @@ step_polkit() {
     local bdir="${src}/build"
     rm -rf "${bdir}"
 
+    # Bug real encontrado 2026-09-30 (re-verificación de Fase 5): con
+    # PKG_CONFIG_SYSROOT_DIR seteado (necesario para que OTRAS dependencias
+    # resuelvan contra el sysroot), `systemd_dep.get_variable(pkgconfig:
+    # 'systemdsystemunitdir')` devuelve una ruta YA absoluta con el sysroot
+    # adentro, y el DESTDIR del install la vuelve a prepender -- mismo bug
+    # de fondo que dbus/pipewire/wireplumber, ver el comentario largo en
+    # step_dbus(). Acá si existe override real en meson_options.txt:
+    # "systemdsystemunitdir" (sin guiones bajos, a diferencia de dbus).
     PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig:${LFS_SYSROOT}/usr/share/pkgconfig" \
     PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
     meson setup "${bdir}" \
@@ -657,10 +676,29 @@ step_polkit() {
         -Dtests=false \
         -Dintrospection=false \
         -Dgtk_doc=false \
-        -Dman=false
+        -Dman=false \
+        -Dsystemdsystemunitdir=/usr/lib/systemd/system
 
     ninja -C "${bdir}" ${MAKEFLAGS}
     DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
+
+    # El mismo bug de fondo afecta también a "sysusers_dir"/"tmpfiles_dir"
+    # (polkit.conf/polkit-tmpfiles.conf) -- pero a diferencia de
+    # systemdsystemunitdir, polkit NO tiene ninguna opción de meson_options.txt
+    # para overridearlos (confirmado leyendo el archivo real), así que acá no
+    # queda otra que corregir a mano los dos archivos que el bug deja mal
+    # ubicados (en "${LFS_SYSROOT}${LFS_SYSROOT}/usr/lib/..." en vez de
+    # "${LFS_SYSROOT}/usr/lib/...").
+    local doubled="${LFS_SYSROOT}${LFS_SYSROOT}"
+    if [[ -d "${doubled}" ]]; then
+        log "Corrigiendo ruta duplicada por el mismo bug de PKG_CONFIG_SYSROOT_DIR+DESTDIR: ${doubled}"
+        mkdir -p "${LFS_SYSROOT}/usr/lib/sysusers.d" "${LFS_SYSROOT}/usr/lib/tmpfiles.d"
+        [[ -f "${doubled}/usr/lib/sysusers.d/polkit.conf" ]] && \
+            mv -f "${doubled}/usr/lib/sysusers.d/polkit.conf" "${LFS_SYSROOT}/usr/lib/sysusers.d/polkit.conf"
+        [[ -f "${doubled}/usr/lib/tmpfiles.d/polkit-tmpfiles.conf" ]] && \
+            mv -f "${doubled}/usr/lib/tmpfiles.d/polkit-tmpfiles.conf" "${LFS_SYSROOT}/usr/lib/tmpfiles.d/polkit-tmpfiles.conf"
+        rm -rf "${doubled}"
+    fi
 
     log "polkit instalado en ${LFS_SYSROOT}/usr"
 }
@@ -1321,6 +1359,85 @@ step_verify_libinput() {
 }
 
 # ------------------------------------------------------------------------------
+# 18b) libxml2 — Meson (desde 2.15.x libxml2 tiene meson.build real, no hace
+# falta autotools). Agregado 2026-09-04 como prerequisito puntual de
+# libxkbcommon/xkbregistry (ver comentario grande en step_libxkbcommon() de
+# más abajo y docs/PENDIENTES.md, Fase 6 Parte 2, error real Vigésimo cuarto
+# -- este agregado, en cambio, corresponde a la Parte 3, prerequisito ya
+# anticipado ahí). Numerado "18b" a propósito -- va lógicamente entre
+# libinput (18) y libxkbcommon (19) sin renumerar el resto de los pasos ya
+# existentes del archivo, que no cambiaron de orden real de ejecución.
+# ------------------------------------------------------------------------------
+step_libxml2() {
+    require_toolchain
+    log "libxml2 ${LIBXML2_VERSION} para ${LFS_TGT} — Meson+Ninja"
+
+    cd "${LFS_SOURCES}"
+    fetch "${LIBXML2_MIRROR}/v${LIBXML2_VERSION}.tar.gz" \
+          "libxml2-${LIBXML2_VERSION}.tar.gz"
+    log_sha256 "${LFS_SOURCES}/libxml2-${LIBXML2_VERSION}.tar.gz"
+    extract_once "${LFS_SOURCES}/libxml2-${LIBXML2_VERSION}.tar.gz" \
+                 "${LFS_BUILD}/.extracted-libxml2"
+
+    # Tag real en GitHub es "v${LIBXML2_VERSION}" -- SÍ pisa el "v" al armar
+    # el directorio del tarball (confirmado bajando el tarball real y
+    # mirando su índice: queda "libxml2-${LIBXML2_VERSION}/", no
+    # "libxml2-v${LIBXML2_VERSION}/" -- mismo comportamiento que la mayoría
+    # de los paquetes de este proyecto, a diferencia puntual de
+    # libxkbcommon, ver su comentario).
+    local src="${LFS_BUILD}/libxml2-${LIBXML2_VERSION}"
+    cd "${src}"
+
+    local crossfile="${LFS_BUILD}/meson-cross-linsi.ini"
+    write_meson_crossfile "${crossfile}"
+
+    local nativefile="${LFS_BUILD}/meson-native-linsi.ini"
+    write_meson_nativefile "${nativefile}"
+
+    local bdir="${src}/build"
+    rm -rf "${bdir}"
+
+    # -Dpython=disabled: los bindings de Python no hacen falta acá (nadie en
+    # este proyecto los usa) y cross-compilarlos necesitaría un Python
+    # cruzado aparte, scope innecesario. -Ddocs=disabled: mismo criterio que
+    # el resto del proyecto, sin xsltproc/docbook instalados no hace falta
+    # arriesgar un fallo de build por algo que no vamos a leer. El resto de
+    # las opciones (zlib, iconv, threads, etc.) se dejan en su default
+    # "auto" -- confirmado contra meson_options.txt real de la 2.15.3 que
+    # ninguna de las que quedan en auto es obligatoria para lo que
+    # xkbregistry necesita (SAX2/reader/xpath básicos, todos "auto" con
+    # default efectivo enabled).
+    meson setup "${bdir}" \
+        --cross-file="${crossfile}" \
+        --native-file="${nativefile}" \
+        --prefix=/usr \
+        --libdir=lib \
+        --buildtype=release \
+        -Dpython=disabled \
+        -Ddocs=disabled
+
+    ninja -C "${bdir}" ${MAKEFLAGS}
+    DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
+
+    log "libxml2 instalado en ${LFS_SYSROOT}/usr"
+}
+
+step_verify_libxml2() {
+    log "Verificación: libxml2.so + libxml-2.0.pc + headers en el sysroot"
+    local ok=1
+    local p
+    for p in \
+        "${LFS_SYSROOT}/usr/lib/libxml2.so" \
+        "${LFS_SYSROOT}/usr/lib/pkgconfig/libxml-2.0.pc" \
+        "${LFS_SYSROOT}/usr/include/libxml2/libxml/parser.h"
+    do
+        if [[ -e "${p}" ]]; then echo "  [OK] ${p}"; else echo "  [FALTA] ${p}"; ok=0; fi
+    done
+    [[ "${ok}" -eq 1 ]] || die "falta algo de libxml2 en el sysroot"
+    log "OK: libxml2 completo en el sysroot."
+}
+
+# ------------------------------------------------------------------------------
 # 19) libxkbcommon — Meson. enable-wayland requiere enable-tools=true (según
 # su propio meson.options: el código de compose/cursor de Wayland vive
 # adentro de "tools"). x11 apagado, sin X11 en este proyecto.
@@ -1354,6 +1471,11 @@ step_libxkbcommon() {
     # -- no hace falta repetir ese build.
     [[ -x "${WAYLAND_SCANNER_NATIVE_PREFIX}/bin/wayland-scanner" ]] \
         || die "no está el wayland-scanner NATIVO en ${WAYLAND_SCANNER_NATIVE_PREFIX}/bin -- corré primero: scripts/build-desktop.sh wayland"
+    # Reactivado 2026-09-04 (prerequisito de Fase 6 Parte 3 ya cumplido):
+    # ver comentario grande de más abajo, en el meson setup.
+    if ! find "${LFS_SYSROOT}/usr/lib/pkgconfig" -maxdepth 1 -name 'libxml-2.0.pc' 2>/dev/null | grep -q .; then
+        die "no está libxml-2.0.pc en el sysroot (lo necesita xkbregistry) -- corré primero: scripts/build-desktop.sh libxml2"
+    fi
 
     local crossfile="${LFS_BUILD}/meson-cross-linsi.ini"
     write_meson_crossfile "${crossfile}"
@@ -1364,17 +1486,16 @@ step_libxkbcommon() {
     local bdir="${src}/build"
     rm -rf "${bdir}"
 
-    # enable-xkbregistry=false a propósito (2026-08-29): esa API opcional
-    # (para listar layouts disponibles, la usan cosas como el selector de
-    # teclado de un DE) pide libxml2 real en tiempo de build
-    # ("Dependency libxml-2.0 not found", meson.build:532) -- y libxml2 no
-    # está compilado en ningún lado del proyecto todavía. El núcleo de
-    # libxkbcommon (compilar keymaps, protocolo xkb de Wayland -- lo que
-    # necesitan wayland/libinput/pipewire/wireplumber en esta Fase 6 Parte 1)
-    # NO depende de xkbregistry. Se pospone a Fase 6 Parte 3 (Qt6/KDE), que
-    # es quien realmente va a necesitar listar layouts (kxkbcommon/kwin) --
-    # ahí hace falta agregar un step_libxml2() cross-compilado y recién
-    # entonces volver a poner esto en true. Ver docs/PENDIENTES.md.
+    # enable-xkbregistry=true (2026-09-04, antes "false" a propósito desde
+    # 2026-08-29): esa API opcional (para listar layouts disponibles, la usa
+    # el selector de teclado de un DE -- kxkbcommon/System Settings en KDE,
+    # que Fase 6 Parte 3 va a necesitar) pedía libxml2 real en tiempo de
+    # build ("Dependency libxml-2.0 not found", meson.build:532) -- ya
+    # resuelto, ver step_libxml2() más arriba (agregado el mismo día, mismo
+    # archivo). El núcleo de libxkbcommon (compilar keymaps, protocolo xkb
+    # de Wayland) nunca dependió de esto, así que reactivarlo no cambia nada
+    # de lo que ya usan wayland/libinput/pipewire/wireplumber -- sólo agrega
+    # la API que faltaba para Parte 3.
     meson setup "${bdir}" \
         --cross-file="${crossfile}" \
         --native-file="${nativefile}" \
@@ -1384,7 +1505,7 @@ step_libxkbcommon() {
         -Denable-tools=true \
         -Denable-docs=false \
         -Denable-x11=false \
-        -Denable-xkbregistry=false
+        -Denable-xkbregistry=true
 
     ninja -C "${bdir}" ${MAKEFLAGS}
     DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
@@ -1393,10 +1514,21 @@ step_libxkbcommon() {
 }
 
 step_verify_libxkbcommon() {
-    log "Verificación: libxkbcommon.so en el sysroot"
-    local p="${LFS_SYSROOT}/usr/lib/libxkbcommon.so"
-    [[ -e "${p}" ]] || die "no está ${p}"
-    echo "  [OK] ${p}"
+    log "Verificación: libxkbcommon.so + libxkbregistry.so en el sysroot"
+    local ok=1
+    local p
+    # libxkbregistry.so/xkbregistry.pc (confirmado contra el meson.build real
+    # de libxkbcommon: get_option('enable-xkbregistry'), filebase
+    # 'xkbregistry') -- sólo existe desde que se reactivó la opción
+    # 2026-09-04, ver comentario grande en step_libxkbcommon().
+    for p in \
+        "${LFS_SYSROOT}/usr/lib/libxkbcommon.so" \
+        "${LFS_SYSROOT}/usr/lib/libxkbregistry.so" \
+        "${LFS_SYSROOT}/usr/lib/pkgconfig/xkbregistry.pc"
+    do
+        if [[ -e "${p}" ]]; then echo "  [OK] ${p}"; else echo "  [FALTA] ${p}"; ok=0; fi
+    done
+    [[ "${ok}" -eq 1 ]] || die "falta algo de libxkbcommon/xkbregistry en el sysroot"
     log "OK: libxkbcommon completo en el sysroot."
 }
 
@@ -1535,6 +1667,11 @@ step_pipewire() {
     local bdir="${src}/build"
     rm -rf "${bdir}"
 
+    # -Dsystemd-*-unit-dir agregados 2026-09-30 (re-verificación de Fase 5):
+    # mismo bug de PKG_CONFIG_SYSROOT_DIR+DESTDIR duplicando la ruta que en
+    # dbus/polkit/wireplumber -- ver el comentario largo en step_dbus().
+    # pipewire sí tiene las dos opciones reales en meson_options.txt
+    # ("systemd-system-unit-dir"/"systemd-user-unit-dir", con guiones).
     meson setup "${bdir}" \
         --cross-file="${crossfile}" \
         --prefix=/usr \
@@ -1549,6 +1686,8 @@ step_pipewire() {
         "-Dsession-managers=[]" \
         -Dsystemd-user-service=enabled \
         -Dsystemd-system-service=disabled \
+        -Dsystemd-system-unit-dir=/usr/lib/systemd/system \
+        -Dsystemd-user-unit-dir=/usr/lib/systemd/user \
         -Dtests=disabled \
         -Ddocs=disabled \
         -Dexamples=disabled
@@ -1633,6 +1772,9 @@ step_wireplumber() {
     local bdir="${src}/build"
     rm -rf "${bdir}"
 
+    # -Dsystemd-*-unit-dir agregados 2026-09-30 (re-verificación de Fase 5):
+    # mismo bug de PKG_CONFIG_SYSROOT_DIR+DESTDIR duplicando la ruta que en
+    # dbus/polkit/pipewire -- ver el comentario largo en step_dbus().
     meson setup "${bdir}" \
         --cross-file="${crossfile}" \
         --prefix=/usr \
@@ -1641,6 +1783,8 @@ step_wireplumber() {
         -Dsystem-lua=true \
         -Dsystem-lua-version=5.4 \
         -Dsystemd=enabled \
+        -Dsystemd-system-unit-dir=/usr/lib/systemd/system \
+        -Dsystemd-user-unit-dir=/usr/lib/systemd/user \
         -Delogind=disabled \
         -Dintrospection=disabled \
         -Ddoc=disabled \
@@ -1701,6 +1845,8 @@ main() {
         verify-xkeyboard-config)  step_verify_xkeyboard_config ;;
         libinput)                 step_libinput ;;
         verify-libinput)          step_verify_libinput ;;
+        libxml2)                  step_libxml2 ;;
+        verify-libxml2)           step_verify_libxml2 ;;
         libxkbcommon)             step_libxkbcommon ;;
         verify-libxkbcommon)      step_verify_libxkbcommon ;;
         alsa-lib)                 step_alsa_lib ;;
@@ -1730,6 +1876,7 @@ main() {
             step_libevdev;             step_verify_libevdev
             step_xkeyboard_config;     step_verify_xkeyboard_config
             step_libinput;             step_verify_libinput
+            step_libxml2;               step_verify_libxml2
             step_libxkbcommon;         step_verify_libxkbcommon
             step_alsa_lib;             step_verify_alsa_lib
             step_lua;                  step_verify_lua
@@ -1738,7 +1885,7 @@ main() {
             log "Fase 6 parte 1 ('fundación no gráfica') completa: D-Bus/polkit, fuentes/2D, Wayland, entrada y audio listos en el sysroot. Falta Mesa/LLVM (drivers gráficos) y Qt6/KDE Frameworks -- van en scripts aparte."
             ;;
         *)
-            die "target desconocido: ${target} (usar: libffi|expat|glib|dbus|duktape|libpng|polkit|freetype|harfbuzz|fontconfig|pixman|cairo|wayland|wayland-protocols|mtdev|libevdev|xkeyboard-config|libinput|libxkbcommon|alsa-lib|lua|pipewire|wireplumber|all, cada uno con su verify-<paso>)"
+            die "target desconocido: ${target} (usar: libffi|expat|glib|dbus|duktape|libpng|polkit|freetype|harfbuzz|fontconfig|pixman|cairo|wayland|wayland-protocols|mtdev|libevdev|xkeyboard-config|libinput|libxml2|libxkbcommon|alsa-lib|lua|pipewire|wireplumber|all, cada uno con su verify-<paso>)"
             ;;
     esac
 }

@@ -30,6 +30,17 @@ services:
       - linsios-sysroot:/lfs/usr
       # Kernel compilado (Fase 1): bzImage + módulos, listos para Fase 8 (ISO).
       - linsios-boot:/lfs/boot
+      # /etc del sysroot final (bug real encontrado 2026-09-30, Fase 5): nunca
+      # tuvo volumen propio, así que vivía en el filesystem efímero del
+      # contenedor -- cualquier `--sysconfdir=/etc` (PAM/systemd-networkd de
+      # Fase 4, dbus/fontconfig/pipewire/polkit de Fase 6 Parte 1, la llave
+      # pública + repositories de apk-signing en Fase 5) se perdía apenas
+      # terminaba el `podman-compose run --rm` que lo escribió, aunque el
+      # verify de ESA MISMA corrida diera bien. Mismo patrón ya conocido
+      # ("el filesystem del contenedor `--rm` es efímero", ver
+      # docs/PENDIENTES.md) pero nunca antes detectado para /etc porque nadie
+      # había confirmado su contenido en una corrida NUEVA hasta ahora.
+      - linsios-etc:/lfs/etc
 
       # --- Bind mounts: se editan/copian en Windows y se ven al instante adentro ---
       # Los scripts se montan de solo lectura desde el repo para poder
@@ -56,3 +67,4 @@ volumes:
   linsios-build:
   linsios-sysroot:
   linsios-boot:
+  linsios-etc:
