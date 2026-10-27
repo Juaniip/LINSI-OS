@@ -636,6 +636,24 @@ require_qttools_native() {
 # revés. Retrofit real: qtbase, qtdeclarative, qtsvg, qt5compat y
 # qtwayland (todo lo que instala contenido QML del árbol de Qt) se
 # tuvieron que RECOMPILAR después de este cambio -- ver docs/PENDIENTES.md.
+#
+# -DINSTALL_PLUGINSDIR=lib/plugins (2026-10-27): mismo bug y mismo criterio
+# que INSTALL_QMLDIR de arriba, encontrado recién al revisar dónde instalaba
+# Qt el plugin de CUPS. Qt compilaba "plugins" (= /usr/plugins) como su
+# directorio de plugins, pero TODO KDE instala en /usr/lib/plugins
+# (KDE_INSTALL_QTPLUGINDIR cae al fallback de KDEInstallDirs6 en build
+# cruzado). En el sistema real, QCoreApplication::libraryPaths() sólo
+# hubiera mirado /usr/plugins: ningún plugin de kwin, applet de Plasma, KCM,
+# módulo de kded ni el tema de plataforma de KDE se hubiera encontrado. Se
+# alinea Qt a KDE (unos 10 módulos de Qt contra más de 100 paquetes de KDE);
+# los módulos de Qt lo heredan de la config de qtbase, igual que el QMLDIR --
+# hay que recompilar los que instalan plugins.
+#
+# -DFEATURE_cups=ON (2026-10-22): sin CUPS en el sysroot, Qt se compiló sin
+# soporte de impresión (sólo imprimía a PDF) y xdg-desktop-portal-kde no
+# compilaba (usa QCUPSSupport). La feature se autodetecta (Cups_FOUND); se
+# fuerza para que, si algún día falta libcups, el configure corte en vez de
+# compilar en silencio sin impresión. Requiere step_cups antes.
 # ------------------------------------------------------------------------------
 step_qtbase() {
     require_toolchain
@@ -668,8 +686,10 @@ step_qtbase() {
         -DQT_BUILD_EXAMPLES=OFF \
         -DQT_BUILD_TESTS=OFF \
         -DFEATURE_xcb=OFF \
+        -DFEATURE_cups=ON \
         -DINPUT_opengl=es2 \
-        -DINSTALL_QMLDIR=lib/qml
+        -DINSTALL_QMLDIR=lib/qml \
+        -DINSTALL_PLUGINSDIR=lib/plugins
 
     ninja -C "${bdir}" ${MAKEFLAGS}
     DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
@@ -6881,6 +6901,40 @@ elif spec == "powerdevil":
             "    connect(this, &DPMS::startFade, this, &DPMS::turnOffOnIdleTimeout);\n",
         ),
     ])
+elif spec == "print-manager":
+    patch_file("src/libkcups/KCupsPasswordDialog.cpp", [
+        ("#include <KWindowSystem>\n#include <KX11Extras>\n", "#include <KWindowSystem>\n"),
+        (
+            "    if (KWindowSystem::isPlatformX11()) {\n"
+            "        KX11Extras::forceActiveWindow(dialog->winId());\n"
+            "    }\n",
+            "",
+        ),
+    ])
+    # if/else: la rama else es la de Wayland -- queda sólo esa. <QWindow> lo
+    # traía KX11Extras de forma transitiva (error real: "invalid use of
+    # incomplete type 'class QWindow'" al sacarlo) -- se incluye directo.
+    patch_file("src/configure-printer/ConfigurePrinterInterface.cpp", [
+        ("#include <KWindowSystem>\n#include <KX11Extras>\n", "#include <KWindowSystem>\n#include <QWindow>\n"),
+        (
+            "        if (KWindowSystem::isPlatformX11()) {\n"
+            "            KX11Extras::forceActiveWindow(m_uis.value(destName)->winId());\n"
+            "        } else {\n"
+            "            m_uis.value(destName)->windowHandle()->requestActivate();\n"
+            "        }\n",
+            "        m_uis.value(destName)->windowHandle()->requestActivate();\n",
+        ),
+    ])
+    # KUserTimestamp sólo existe con KWindowSystem compilado con X11; fuera de
+    # X11 su userTimestamp() devuelve 0 -- se pasa 0 (mismo comportamiento que
+    # en Wayland; mismo caso que soliduiserver en plasma-workspace).
+    patch_file("src/print-queue/PrintQueue.cpp", [
+        ("#include <KUserTimestamp>\n", ""),
+        (
+            "        auto usertime = static_cast<qlonglong>(KUserTimestamp::userTimestamp());\n",
+            "        auto usertime = static_cast<qlonglong>(0);\n",
+        ),
+    ])
 elif spec == "plasma-login-manager":
     # Error real: el greeter linkea X11::X11 sin usar Xlib (su único rastro
     # de X11 es KWindowSystem::isPlatformX11() en main.cpp, que no necesita
@@ -6898,6 +6952,7 @@ _patch_kscreen()            { _apply_x11_patches "$1" kscreen; }
 _patch_plasma_nm()          { _apply_x11_patches "$1" plasma-nm; }
 _patch_powerdevil()         { _apply_x11_patches "$1" powerdevil; }
 _patch_plasma_login_manager() { _apply_x11_patches "$1" plasma-login-manager; }
+_patch_print_manager()      { _apply_x11_patches "$1" print-manager; }
 
 # polkit-kde-agent-1 -- los diálogos de autenticación de polkit.
 step_polkit_kde_agent() { _plasma_cmake_build PolkitKdeAgent polkit-kde-agent-1; }
@@ -7004,6 +7059,284 @@ step_verify_plasma_login_manager() {
     [[ -n "${p}" ]] || die "no se encontró la unidad systemd de plasma-login-manager"
     echo "  [OK] ${p}"
     log "OK: plasma-login-manager completo en el sysroot."
+}
+
+# ------------------------------------------------------------------------------
+# Impresión (2026-10-22). Decisión de Juani: "CUPS + filtros, sin
+# ghostscript" -- CUPS 2.4.20 (libcups + cupsd) + la pila de filtros de
+# OpenPrinting (PDFio, libcupsfilters, libppd, cups-filters) + qtbase con
+# soporte cups + print-manager. Imprime en impresoras que aceptan PDF directo
+# (la mayoría de las de red modernas); el paso PDF->raster lo hacen
+# ghostscript/mupdf como binarios externos y quedan afuera a propósito. Lo
+# destrabó xdg-desktop-portal-kde, cuyo print.cpp usa QCUPSSupport sin
+# condición (Qt se había compilado sin CUPS: el sistema no podía imprimir).
+# ------------------------------------------------------------------------------
+
+# PDFio -- librería C chica (del autor de CUPS) que libcupsfilters 2.2 pide sin
+# condición ("PKG_CHECK_MODULES([LIBPDFIO], [pdfio >= 1.6.4])"). configure
+# propio (no automake): sólo zlib obligatorio; por default instala la
+# estática -- se pide la compartida.
+step_pdfio() {
+    require_toolchain
+    log "PDFio ${PDFIO_VERSION} para ${LFS_TGT} — configure"
+
+    cd "${LFS_SOURCES}"
+    fetch "${PDFIO_MIRROR}/pdfio-${PDFIO_VERSION}.tar.gz" "pdfio-${PDFIO_VERSION}.tar.gz"
+    log_sha256 "${LFS_SOURCES}/pdfio-${PDFIO_VERSION}.tar.gz"
+    extract_once "${LFS_SOURCES}/pdfio-${PDFIO_VERSION}.tar.gz" \
+                 "${LFS_BUILD}/.extracted-pdfio-${PDFIO_VERSION}"
+
+    local src="${LFS_BUILD}/pdfio-${PDFIO_VERSION}"
+    cd "${src}"
+    make distclean >/dev/null 2>&1 || true
+
+    PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig:${LFS_SYSROOT}/usr/share/pkgconfig" \
+    PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
+    ./configure \
+        --host="${LFS_TGT}" \
+        --build="$(build_triplet)" \
+        --prefix=/usr \
+        --libdir=/usr/lib \
+        --enable-shared \
+        --disable-static \
+        --enable-libpng
+
+    make ${MAKEFLAGS}
+    make DESTDIR="${LFS_SYSROOT}" install
+
+    log "PDFio instalado en ${LFS_SYSROOT}/usr"
+}
+step_verify_pdfio() {
+    log "Verificación: libpdfio.so + pdfio.pc en el sysroot"
+    local ok=1 p
+    for p in "${LFS_SYSROOT}/usr/lib/libpdfio.so" "${LFS_SYSROOT}/usr/lib/pkgconfig/pdfio.pc"; do
+        if [[ -e "${p}" ]]; then echo "  [OK] ${p}"; else echo "  [FALTA] ${p}"; ok=0; fi
+    done
+    [[ "${ok}" -eq 1 ]] || die "falta algo de PDFio"
+    log "OK: PDFio completo en el sysroot."
+}
+
+# CUPS -- libcups + cupsd. Rutas de systemd y D-Bus explícitas (bug del doble
+# sysroot, ver merge_doubled_sysroot). Sin Avahi (--with-dnssd=no): las
+# impresoras se agregan a mano por IPP. Sin libusb: las USB siguen andando
+# por el driver del kernel (usblp, /dev/usb/lp*). Usuario/grupo "lp" y grupo
+# de administración "lpadmin" -- todavía no existen en el sysroot (lo mismo
+# que el resto de los usuarios de sistema: los crea la imagen en Fase 8).
+step_cups() {
+    require_toolchain
+    log "CUPS ${CUPS_VERSION} para ${LFS_TGT} — configure"
+
+    cd "${LFS_SOURCES}"
+    fetch "${CUPS_MIRROR}/cups-${CUPS_VERSION}-source.tar.gz" "cups-${CUPS_VERSION}-source.tar.gz"
+    log_sha256 "${LFS_SOURCES}/cups-${CUPS_VERSION}-source.tar.gz"
+    extract_once "${LFS_SOURCES}/cups-${CUPS_VERSION}-source.tar.gz" \
+                 "${LFS_BUILD}/.extracted-cups-${CUPS_VERSION}"
+
+    local src="${LFS_BUILD}/cups-${CUPS_VERSION}"
+    cd "${src}"
+    make distclean >/dev/null 2>&1 || true
+
+    # Bug real de upstream (CUPS 2.4.20, primer intento): sin DNS-SD,
+    # cupsEnumDests() usa data.num_local/data.local_dests con "data" de tipo
+    # _cups_getdata_t, y ese struct nunca los declara (sólo existen en la
+    # variante con DNS-SD) -- "error: '_cups_getdata_t' has no member named
+    # 'num_local'" en cups/dest.c. Con Avahi (lo normal en las distros) no se
+    # ve. Se declaran los dos campos: el código ya los inicializa en 0/NULL y
+    # los libera al final, no cambia el comportamiento. Idempotente.
+    if ! grep -q "LINSI-OS: campos de cupsEnumDests" cups/dest.c; then
+        _replace_once cups/dest.c \
+            "} _cups_getdata_t;
+" \
+            "  int		num_local;		/* LINSI-OS: campos de cupsEnumDests sin DNS-SD */
+  cups_dest_t	*local_dests;
+} _cups_getdata_t;
+"
+    fi
+
+    PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig:${LFS_SYSROOT}/usr/share/pkgconfig" \
+    PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
+    ./configure \
+        --host="${LFS_TGT}" \
+        --build="$(build_triplet)" \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --localstatedir=/var \
+        --libdir=/usr/lib \
+        --with-rundir=/run/cups \
+        --with-tls=openssl \
+        --with-dnssd=no \
+        --disable-libusb \
+        --disable-gssapi \
+        --with-ondemand=systemd \
+        --with-systemd=/usr/lib/systemd/system \
+        --with-dbusdir=/usr/share/dbus-1 \
+        --with-cups-user=lp \
+        --with-cups-group=lp \
+        --with-system-groups=lpadmin
+
+    make ${MAKEFLAGS}
+    make DESTDIR="${LFS_SYSROOT}" install
+
+    log "CUPS instalado en ${LFS_SYSROOT}/usr"
+}
+step_verify_cups() {
+    log "Verificación: libcups, cupsd, cups-config y unidad systemd"
+    local ok=1 p
+    for p in "${LFS_SYSROOT}/usr/lib/libcups.so" "${LFS_SYSROOT}/usr/sbin/cupsd" \
+             "${LFS_SYSROOT}/usr/bin/cups-config" "${LFS_SYSROOT}/usr/lib/systemd/system/cups.service"; do
+        if [[ -e "${p}" ]]; then echo "  [OK] ${p}"; else echo "  [FALTA] ${p}"; ok=0; fi
+    done
+    [[ "${ok}" -eq 1 ]] || die "falta algo de CUPS en el sysroot"
+    log "OK: CUPS completo en el sysroot."
+}
+
+# Helper común a libcupsfilters/libppd/cups-filters (los tres son autotools de
+# OpenPrinting con el mismo esquema). cups-config del sysroot es seguro en
+# build cruzado: con prefix /usr devuelve --cflags vacío y --libs "-lcups"
+# (confirmado). Las rutas a binarios de runtime (ippfind) se pasan fijas: si
+# las busca el configure por el PATH, encuentra las del sysroot y quedaría
+# "/lfs/usr/bin/..." compilado (mismo bug que LVM2/systemd-run).
+_openprinting_build() {
+    local name="$1" version="$2" mirror="$3"; shift 3
+    require_toolchain
+    log "${name} ${version} para ${LFS_TGT} — Autotools"
+
+    cd "${LFS_SOURCES}"
+    fetch "${mirror}/${name}-${version}.tar.xz" "${name}-${version}.tar.xz"
+    log_sha256 "${LFS_SOURCES}/${name}-${version}.tar.xz"
+    extract_once "${LFS_SOURCES}/${name}-${version}.tar.xz" \
+                 "${LFS_BUILD}/.extracted-${name}-${version}"
+
+    local src="${LFS_BUILD}/${name}-${version}"
+    # OP_PATCH_FN: función opcional que recibe el árbol de fuentes recién
+    # extraído (ver step_libppd). Tiene que ser idempotente.
+    [[ -n "${OP_PATCH_FN:-}" ]] && "${OP_PATCH_FN}" "${src}"
+    local bdir="${src}/build"
+    rm -rf "${bdir}"
+    mkdir -p "${bdir}"
+    cd "${bdir}"
+
+    PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig:${LFS_SYSROOT}/usr/share/pkgconfig" \
+    PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
+    ../configure \
+        --host="${LFS_TGT}" \
+        --build="$(build_triplet)" \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --localstatedir=/var \
+        --libdir=/usr/lib \
+        --disable-static \
+        --with-cups-config="${LFS_SYSROOT}/usr/bin/cups-config" \
+        --with-ippfind-path=/usr/bin/ippfind \
+        "$@"
+
+    # OP_MAKE_ARGS: variables extra para make (ver step_libcupsfilters).
+    make ${MAKEFLAGS} ${OP_MAKE_ARGS:-}
+    make DESTDIR="${LFS_SYSROOT}" ${OP_MAKE_ARGS:-} install
+    find "${LFS_SYSROOT}/usr/lib" -maxdepth 1 -name "${name#lib}*.la" -delete 2>/dev/null || true
+    find "${LFS_SYSROOT}/usr/lib" -maxdepth 1 -name "lib${name#lib}*.la" -delete 2>/dev/null || true
+    merge_doubled_sysroot
+
+    log "${name} instalado en ${LFS_SYSROOT}/usr"
+}
+
+# libcupsfilters -- la librería de filtros (pdftopdf vía PDFio, texttopdf,
+# imagetopdf/raster, etc.). Sin ghostscript ni mutool (decisión de Juani: los
+# dos son binarios externos que libcupsfilters invoca para PDF->raster), sin
+# jpeg/tiff/jpegxl/exif (no están en el sysroot; png/lcms2/fontconfig sí).
+#
+# BUILT_SOURCES= (error real en el primer intento): el Makefile.am real genera
+# cupsfilters/test_files/test_text_lorem.txt como BUILT_SOURCES ejecutando
+# gen-lorem-text, un programa que compila CRUZADO -- en el contenedor falla
+# con "GLIBC_2.38 not found". Ese archivo son datos de prueba para los tests
+# de texttopdf (make check, que no se corre); vaciar BUILT_SOURCES desde la
+# línea de comandos de make lo saltea sin tocar la fuente.
+#
+# _patch_libcupsfilters_datadir (bug real, encontrado con check-sysroot.sh):
+# configure toma CUPS_DATADIR con "pkg-config --variable=cups_datadir cups",
+# que con PKG_CONFIG_SYSROOT_DIR vuelve "/lfs/usr/share/cups" -- quedaba
+# compilado en libcupsfilters.so (config.h) y como ruta de instalación (los
+# banners caían en /lfs/lfs). Se le saca el sysroot en el propio configure.
+_patch_libcupsfilters_datadir() {
+    local configure="$1/configure"
+    grep -q 'PKG_CONFIG_SYSROOT_DIR##' "${configure}" && return 0
+    sed -i -E 's#(\$\(\$PKGCONFIG --variable=cups_datadir cups3?)\)#\1 | sed "s\#^$PKG_CONFIG_SYSROOT_DIR\#\#")#' "${configure}"
+    grep -q 'PKG_CONFIG_SYSROOT_DIR##' "${configure}" || die "no se pudo parchear CUPS_DATADIR en ${configure}"
+    log "configure de libcupsfilters: CUPS_DATADIR sin el sysroot"
+}
+step_libcupsfilters() {
+    [[ -e "${LFS_SYSROOT}/usr/lib/libpdfio.so" ]] || die "falta PDFio -- corré primero: scripts/build-kde.sh pdfio"
+    OP_PATCH_FN=_patch_libcupsfilters_datadir \
+    OP_MAKE_ARGS="BUILT_SOURCES=" \
+    _openprinting_build libcupsfilters "${LIBCUPSFILTERS_VERSION}" "${LIBCUPSFILTERS_MIRROR}" \
+        --disable-ghostscript \
+        --disable-mutool \
+        --disable-exif \
+        --without-jpeg \
+        --without-tiff \
+        --without-jpegxl
+}
+step_verify_libcupsfilters() { _kf6_verify_lib libcupsfilters libcupsfilters.so; }
+
+# libppd -- soporte de PPD (impresoras con driver clásico) sobre
+# libcupsfilters. Sin ninguno de los renderizadores externos.
+#
+# Bug real de upstream (libppd 2.1.1, primer intento): con TODOS los
+# renderizadores apagados, el configure deja CUPS_PDFTOPS_RENDERER vacío
+# ("#define CUPS_PDFTOPS_RENDERER" sin valor) y ppd/pdftops.c hace
+# "renderer_t renderer = CUPS_PDFTOPS_RENDERER;" -- "error: expected
+# expression before ';' token". Se arranca el configure con GS por default en
+# vez de vacío: el filtro pdftops (sólo para impresoras PostScript, que igual
+# necesitan un renderizador) busca gs en runtime y, si no está, falla con un
+# error claro; si algún día se agrega ghostscript, ya apunta a él.
+_patch_libppd_renderer() {
+    local configure="$1/configure"
+    grep -q '^CUPS_PDFTOPS_RENDERER=""$' "${configure}" || return 0
+    sed -i 's/^CUPS_PDFTOPS_RENDERER=""$/CUPS_PDFTOPS_RENDERER="GS"/' "${configure}"
+    log "configure de libppd: renderer por default GS (no vacío)"
+}
+step_libppd() {
+    OP_PATCH_FN=_patch_libppd_renderer \
+    _openprinting_build libppd "${LIBPPD_VERSION}" "${LIBPPD_MIRROR}" \
+        --disable-ghostscript \
+        --disable-pdftops \
+        --disable-mutool \
+        --disable-pdftocairo \
+        --disable-acroread
+}
+step_verify_libppd() { _kf6_verify_lib libppd libppd.so; }
+
+# cups-filters -- los filtros y backends de CUPS que usan las dos librerías de
+# arriba. Poppler viene apagado por default; se apagan ghostscript y mutool.
+step_cups_filters() {
+    _openprinting_build cups-filters "${CUPS_FILTERS_VERSION}" "${CUPS_FILTERS_MIRROR}" \
+        --disable-ghostscript \
+        --disable-mutool
+}
+step_verify_cups_filters() {
+    log "Verificación: filtros de cups-filters en el sysroot"
+    local p
+    p="$(find "${LFS_SYSROOT}/usr/lib/cups/filter" -type f -print -quit 2>/dev/null)"
+    [[ -n "${p}" ]] || die "no hay filtros en ${LFS_SYSROOT}/usr/lib/cups/filter"
+    echo "  [OK] $(find "${LFS_SYSROOT}/usr/lib/cups/filter" -type f | wc -l) filtros en ${LFS_SYSROOT}/usr/lib/cups/filter"
+    log "OK: cups-filters completo en el sysroot."
+}
+
+# print-manager -- KCM de impresoras + applet de Plasma 6.7.4. Pide
+# "find_package(Cups 2.4 REQUIRED)" (tenemos 2.4.20), KF6 Kirigami/KCMUtils/
+# etc. y KirigamiAddons >= 1.10 (tenemos 1.13.1). SCP_INSTALL=OFF: con
+# PackageKitQt6 ofrecería instalar system-config-printer, que acá no existe.
+step_print_manager() {
+    [[ -e "${LFS_SYSROOT}/usr/lib/libcups.so" ]] || die "falta CUPS -- corré primero: scripts/build-kde.sh cups"
+    _plasma_cmake_build PrintManager print-manager -DSCP_INSTALL=OFF
+}
+step_verify_print_manager() {
+    log "Verificación: KCM de impresoras en el sysroot"
+    local p
+    p="$(find "${LFS_SYSROOT}/usr/lib/plugins" -name '*printer*manager*.so' -print -quit 2>/dev/null)"
+    [[ -n "${p}" ]] || die "no se encontró el KCM de print-manager"
+    echo "  [OK] ${p}"
+    log "OK: print-manager completo en el sysroot."
 }
 
 # ------------------------------------------------------------------------------
@@ -7701,6 +8034,18 @@ main() {
         verify-xdg-desktop-portal-kde) step_verify_xdg_desktop_portal_kde ;;
         plasma-login-manager)     step_plasma_login_manager ;;
         verify-plasma-login-manager) step_verify_plasma_login_manager ;;
+        pdfio)                    step_pdfio ;;
+        verify-pdfio)             step_verify_pdfio ;;
+        cups)                     step_cups ;;
+        verify-cups)              step_verify_cups ;;
+        libcupsfilters)           step_libcupsfilters ;;
+        verify-libcupsfilters)    step_verify_libcupsfilters ;;
+        libppd)                   step_libppd ;;
+        verify-libppd)            step_verify_libppd ;;
+        cups-filters)             step_cups_filters ;;
+        verify-cups-filters)      step_verify_cups_filters ;;
+        print-manager)            step_print_manager ;;
+        verify-print-manager)     step_verify_print_manager ;;
         libplasma)                step_libplasma ;;
         verify-libplasma)         step_verify_libplasma ;;
         kwayland)                 step_kwayland ;;
@@ -7806,6 +8151,9 @@ main() {
             step_qtshadertools_native; step_verify_qtshadertools_native
             step_qtsvg_native;     step_verify_qtsvg_native
             step_qtdeclarative_native; step_verify_qtdeclarative_native
+            # CUPS antes de qtbase: qtbase se compila con -DFEATURE_cups=ON
+            # (2026-10-22). CUPS sólo depende de fases anteriores.
+            step_cups;             step_verify_cups
             step_qtbase;           step_verify_qtbase
             step_qtshadertools;    step_verify_qtshadertools
             step_qtdeclarative;    step_verify_qtdeclarative
@@ -7941,8 +8289,14 @@ main() {
             step_powerdevil;       step_verify_powerdevil
             step_plasma_nm;        step_verify_plasma_nm
             step_plasma_pa;        step_verify_plasma_pa
-            step_xdg_desktop_portal_kde; step_verify_xdg_desktop_portal_kde
             step_plasma_login_manager; step_verify_plasma_login_manager
+            # Impresión (CUPS ya se compiló antes de qtbase).
+            step_pdfio;            step_verify_pdfio
+            step_libcupsfilters;   step_verify_libcupsfilters
+            step_libppd;           step_verify_libppd
+            step_cups_filters;     step_verify_cups_filters
+            step_print_manager;    step_verify_print_manager
+            step_xdg_desktop_portal_kde; step_verify_xdg_desktop_portal_kde
             log "Fase 6 Parte 3: núcleo de Plasma compilado; escritorio usable en curso -- ver docs/PENDIENTES.md."
             ;;
         *)

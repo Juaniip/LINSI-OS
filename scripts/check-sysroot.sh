@@ -69,5 +69,21 @@ done < <(find "${LFS_SYSROOT}/usr/share" "${LFS_SYSROOT}/usr/lib" "${LFS_SYSROOT
                  -o -name '*.json' -o -name '*.xml' -o -name '*.rules' -o -name '*.policy' \) \
               -not -path '*/pkgconfig/*' -not -path '*/cmake/*' 2>/dev/null)
 
+echo "== 3. Directorios de plugins/QML de Qt alineados con los de KDE"
+# Qt sólo busca plugins y módulos QML donde se compiló (QT6_INSTALL_*); KDE
+# instala en lib/plugins y lib/qml. Si no coinciden, en el sistema real Qt no
+# encuentra nada de KDE (pasó con los plugins hasta 2026-10-27).
+qtcfg="$(grep -rh 'set(QT6_INSTALL_\(PLUGINS\|QML\) ' "${LFS_SYSROOT}/usr/lib/cmake/Qt6/" 2>/dev/null | sort -u || true)"
+for want in 'set(QT6_INSTALL_PLUGINS "lib/plugins")' 'set(QT6_INSTALL_QML "lib/qml")'; do
+    if ! grep -qF "${want}" <<<"${qtcfg}"; then
+        problems=$((problems + 1))
+        echo "  Qt no tiene ${want} -- tiene: $(tr '\n' ' ' <<<"${qtcfg}")"
+    fi
+done
+if [[ -d "${LFS_SYSROOT}/usr/plugins" ]]; then
+    problems=$((problems + 1))
+    echo "  existe ${LFS_SYSROOT}/usr/plugins (restos de un Qt compilado con otro directorio de plugins)"
+fi
+
 echo "ELF revisados: ${#elfs[@]} -- problemas: ${problems}"
 [[ "${problems}" -eq 0 ]]

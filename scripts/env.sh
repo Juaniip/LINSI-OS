@@ -699,6 +699,18 @@ export MODEMMANAGER_VERSION="1.24.2"
 #   que alcanza con los headers. 1.92.0 = último release real de
 #   github.com/boostorg/boost/releases (API en vivo).
 export BOOST_VERSION="1.92.0"
+# Impresión (2026-10-22, decisión de Juani: "CUPS + filtros, sin
+# ghostscript"): CUPS 2.4.20 (libcups + cupsd) y la pila de filtros de
+# OpenPrinting. libcupsfilters 2.2 pide PDFio sin condición (reemplazó a
+# qpdf). Últimos releases reales en github.com/OpenPrinting/* y
+# github.com/michaelrsweet/pdfio (API en vivo). libcupsfilters 2.1.2 es más
+# NUEVO por fecha (2026-10-05) pero es mantenimiento de la rama 2.1; se usa
+# la 2.2.1, que es la que pide PDFio.
+export PDFIO_VERSION="1.6.5"
+export CUPS_VERSION="2.4.20"
+export LIBCUPSFILTERS_VERSION="2.2.1"
+export LIBPPD_VERSION="2.1.1"
+export CUPS_FILTERS_VERSION="2.0.1"
 
 # libxcb (Tier 3, retrofit real 2026-09-04): libplasma v6.7.4 tiene un bug
 # real de upstream -- src/plasma/private/blureffectwatcher_p.h hace
@@ -1009,6 +1021,11 @@ export LIBSNDFILE_MIRROR="https://github.com/libsndfile/libsndfile/releases/down
 export PULSEAUDIO_MIRROR="https://www.freedesktop.org/software/pulseaudio/releases"
 export PULSEAUDIO_QT_MIRROR="https://download.kde.org/stable/pulseaudio-qt"
 export QTKEYCHAIN_MIRROR="https://github.com/frankosterfeld/qtkeychain/archive/refs/tags"
+export PDFIO_MIRROR="https://github.com/michaelrsweet/pdfio/releases/download/v${PDFIO_VERSION}"
+export CUPS_MIRROR="https://github.com/OpenPrinting/cups/releases/download/v${CUPS_VERSION}"
+export LIBCUPSFILTERS_MIRROR="https://github.com/OpenPrinting/libcupsfilters/releases/download/${LIBCUPSFILTERS_VERSION}"
+export LIBPPD_MIRROR="https://github.com/OpenPrinting/libppd/releases/download/${LIBPPD_VERSION}"
+export CUPS_FILTERS_MIRROR="https://github.com/OpenPrinting/cups-filters/releases/download/${CUPS_FILTERS_VERSION}"
 export BOOST_MIRROR="https://github.com/boostorg/boost/releases/download/boost-${BOOST_VERSION}"
 export MODEMMANAGER_MIRROR="https://gitlab.freedesktop.org/mobile-broadband/ModemManager/-/archive/${MODEMMANAGER_VERSION}"
 # libxcb y su cadena de dependencias: xorg.freedesktop.org, accesible en
