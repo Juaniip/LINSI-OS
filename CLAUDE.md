@@ -40,8 +40,11 @@ comunicaciones) completas. Fase 6: Partes 1 y 2 completas; de la Parte 3
 está compilado el núcleo de Plasma (Qt6, KF6, kwin, plasma-workspace,
 2026-09-17) y, desde 2026-10-22, el escritorio en sí: plasma-desktop,
 plasma-login-manager, systemsettings, plasma-nm/plasma-pa, powerdevil,
-kscreen, etc. (14 de 15 paquetes; falta xdg-desktop-portal-kde por la
-decisión de impresión/CUPS). Wayland puro sostenido (sin libX11, sin KCM
+kscreen, etc. (los 16 paquetes), más impresión completa (CUPS 2.4.20 +
+filtros de OpenPrinting sin ghostscript + Qt con cups + print-manager +
+xdg-desktop-portal-kde). Qt quedó alineado con KDE también en el
+directorio de plugins (`lib/plugins`, 2026-10-27 — antes Qt no hubiera
+encontrado ningún plugin de KDE). Wayland puro sostenido (sin libX11, sin KCM
 de teclado — el layout va fijo en `/etc/skel`). Faltan Konsole/Dolphin,
 kpipewire, `/etc/skel` (layout, tema oscuro, Nerd Fonts). Nada se arrancó
 todavía en una máquina real ni en QEMU — **antes de eso, correr

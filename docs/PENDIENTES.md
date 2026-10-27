@@ -3168,12 +3168,13 @@ aparte.
   powerdevil, plasma-desktop/kaccess…). `_kf6_cmake_build()` y
   `_plasma_cmake_build()` llaman a `merge_doubled_sysroot` después de
   instalar, así lo que caiga en `/lfs/lfs` se mueve y queda en el log.
-- **Paquetes de Plasma 6.7.4 — 14 de 15 ✅ compilados y verificados:**
+- **Paquetes de Plasma 6.7.4 — los 16 ✅ compilados y verificados:**
   plasma5support, kactivitymanagerd, qqc2-breeze-style, plasma-integration,
   **plasma-desktop** (shell `org.kde.plasma.desktop`), systemsettings,
   kde-cli-tools, polkit-kde-agent-1, milou, kscreen, powerdevil, plasma-nm,
-  plasma-pa y **plasma-login-manager** (`plasmalogin.service`). Falta
-  xdg-desktop-portal-kde (ver más abajo). Errores reales y fixes, en orden:
+  plasma-pa, **plasma-login-manager** (`plasmalogin.service`),
+  xdg-desktop-portal-kde y print-manager (los dos últimos con la impresión,
+  ver más abajo). Errores reales y fixes, en orden:
   - **Mismo bug sistémico de X11 de siempre** (include X11-only sin guard,
     uso detrás de un chequeo de runtime) en polkit-kde-agent-1
     (`policykitlistener.cpp`), kscreen (`osd/osd.cpp`), plasma-nm
@@ -3223,14 +3224,91 @@ aparte.
     (los `.mo`), `head` cierra el pipe, `find` muere con SIGPIPE y
     `pipefail` mata el script en silencio. Todos los verifies nuevos pasaron
     a `find ... -print -quit`.
-- **Pendiente — xdg-desktop-portal-kde:** su `print.cpp` usa
+- **xdg-desktop-portal-kde destrabó la impresión:** su `print.cpp` usa
   `QtPrintSupport/private/qcups_p.h` (`QCUPSSupport`) sin condición, y el
-  Qt6 de este proyecto se compiló sin CUPS. De fondo: **no hay soporte de
-  impresión en todo el sistema** (Qt sin CUPS sólo imprime a PDF). Decisión
-  pendiente con Juani: agregar CUPS (libcups + daemon + recompilar qtbase
-  con cups) o parchear el portal para imprimir sólo a archivo. El portal
-  sirve sobre todo para apps sandbox (Flatpak, Fase 7); el escritorio
-  nativo no lo necesita para arrancar.
+  Qt6 de este proyecto se había compilado sin CUPS — de fondo, **el sistema
+  entero no podía imprimir** (Qt sin CUPS sólo imprime a PDF).
+
+### Impresión (2026-10-22 / 2026-10-27)
+
+**Decisión de Juani: "CUPS + filtros, sin ghostscript".** En el laboratorio
+hoy no hay impresoras ni servidor de impresión; el sistema queda listo para
+cuando se conecte una. Research contra los tarballs reales:
+- CUPS 2.4.20 compila libcups + `cupsd` juntos; dependencias (OpenSSL,
+  zlib, PAM, systemd, dbus) ya en el sysroot.
+- libcupsfilters 2.2 **reemplazó qpdf por PDFio** (C, chico, del autor de
+  CUPS): `PKG_CHECK_MODULES([LIBPDFIO], [pdfio >= 1.6.4])` sin condición.
+- PDF→raster NO está en libcupsfilters: invoca **ghostscript o mupdf** como
+  binarios externos (opciones `--disable-ghostscript`/`--disable-mutool`).
+  Sin ellos se imprime en impresoras que aceptan PDF directo (la mayoría de
+  las de red modernas); ghostscript se agrega si aparece una que lo necesite.
+- Sin Avahi (`--with-dnssd=no`): impresoras por IPP a mano, sin
+  autodescubrimiento.
+
+**Compilado y verificado:** PDFio 1.6.5, CUPS 2.4.20, libcupsfilters 2.2.1,
+libppd 2.1.1, cups-filters 2.0.1 (27 filtros + `driverless` + backends),
+qtbase con `-DFEATURE_cups=ON` (plugin `libcupsprintersupport.so` +
+`qcups_p.h`), print-manager (KCM de impresoras, `SCP_INSTALL=OFF`) y
+xdg-desktop-portal-kde. Errores reales, en orden:
+- **CUPS 2.4.20 — bug de upstream sin DNS-SD:** `cupsEnumDests()` usa
+  `data.num_local`/`data.local_dests` con `data` de tipo
+  `_cups_getdata_t`, que nunca declara esos campos (sólo la variante con
+  DNS-SD) — `error: '_cups_getdata_t' has no member named 'num_local'`. Con
+  Avahi (lo normal) no se ve. Fix: declarar los dos campos (el código ya los
+  inicializa en 0/NULL y los libera).
+- **libcupsfilters:** `BUILT_SOURCES` genera un archivo de prueba ejecutando
+  `gen-lorem-text`, compilado CRUZADO (`GLIBC_2.38 not found`). Son datos
+  para `make check` — `make BUILT_SOURCES=` los saltea sin tocar la fuente.
+  Además, `merge_doubled_sysroot` movió los banners de CUPS que caían en
+  `/lfs/lfs` (la red de seguridad funcionando).
+- **libppd 2.1.1 — bug de upstream sin renderizadores:** con todos
+  apagados, `CUPS_PDFTOPS_RENDERER` queda vacío y `pdftops.c` hace
+  `renderer = CUPS_PDFTOPS_RENDERER;` (`expected expression before ';'`).
+  Fix: el `configure` arranca con `GS` por default en vez de vacío (el
+  filtro busca gs en runtime y falla claro si no está).
+- `cups-config` del sysroot es seguro en build cruzado: con prefix `/usr`
+  devuelve `--cflags` vacío y `--libs -lcups` (confirmado).
+- **libcupsfilters — ruta del sysroot compilada (lo encontró
+  `check-sysroot.sh`):** su configure toma `CUPS_DATADIR` con `pkg-config
+  --variable=cups_datadir cups`, que con `PKG_CONFIG_SYSROOT_DIR` vuelve
+  `/lfs/usr/share/cups` — quedaba en `config.h` (dentro de la librería) y
+  como ruta de instalación. Fix: el configure le saca el sysroot a ese
+  valor (`_patch_libcupsfilters_datadir`).
+- **print-manager:** el mismo bug sistémico de X11 en 3 archivos de un
+  solo golpe (`libkcups/KCupsPasswordDialog.cpp`,
+  `configure-printer/ConfigurePrinterInterface.cpp` — if/else que queda en
+  la rama de Wayland, con `<QWindow>` incluido directo porque lo traía
+  `KX11Extras` de forma transitiva — y `print-queue/PrintQueue.cpp`, donde
+  `KUserTimestamp::userTimestamp()` es código vivo: se pasa `0`, que es lo
+  que esa función devuelve fuera de X11). `SCP_INSTALL=OFF` (sin
+  PackageKit). Además `download.kde.org` mandaba siempre a un mirror de
+  Brasil caído (`linorg.usp.br`); el tarball se bajó del mirror de GWDG y se
+  controló contra el sha256 oficial de `download.kde.org` (idéntico).
+- **Orden de `all`:** qtbase ahora necesita CUPS antes; `step_cups` va
+  delante de `step_qtbase` (CUPS sólo depende de fases anteriores).
+
+### Directorio de plugins de Qt desalineado con KDE (2026-10-27) — CRÍTICO
+
+Al revisar dónde instalaba Qt el plugin de CUPS: Qt tenía compilado
+`plugins` (= `/usr/plugins`) como directorio de plugins, pero TODO KDE
+instala en `/usr/lib/plugins` (`KDE_INSTALL_QTPLUGINDIR` cae al fallback de
+KDEInstallDirs6 en build cruzado). En el sistema real Qt sólo mira su propio
+directorio: **ningún plugin de kwin, applet de Plasma, KCM, módulo de kded
+ni el tema de plataforma de KDE se hubiera encontrado.** Mismo bug y mismo
+criterio que `INSTALL_QMLDIR=lib/qml` (2026-09-04): se alinea Qt a KDE con
+`-DINSTALL_PLUGINSDIR=lib/plugins` en qtbase (los demás módulos lo heredan
+de su config) y se recompilaron los 10 módulos de Qt que instalan plugins;
+se borró el `/usr/plugins` viejo (todas sus carpetas tenían reemplazo).
+`check-sysroot.sh` suma un tercer chequeo: `QT6_INSTALL_PLUGINS`/
+`QT6_INSTALL_QML` tienen que ser `lib/plugins`/`lib/qml` y `/usr/plugins` no
+tiene que existir.
+
+**Lección de procedimiento (error propio, 2026-10-27):** editar
+`build-kde.sh` mientras un build en segundo plano lo está ejecutando corta
+la corrida — bash lee el script de a pedazos y, si las líneas se mueven,
+sigue desde un punto equivocado (`p_verify_systemsettings: command not
+found` al final del step de qtbase, que sí había instalado bien). No editar
+scripts con un build en curso.
 - **Otros pendientes del escritorio:** kpipewire (módulo QML
   `org.kde.pipewire`, RUNTIME de plasma-desktop: miniaturas de ventanas en
   el taskmanager bajo Wayland), layout de teclado fijo + tema oscuro + Nerd
