@@ -41,3 +41,9 @@ Thumbs.db
 
 # --- Carpeta de descarte usada durante el trabajo con Claude ---
 _to_delete/
+
+# --- Imágenes booteables de Fase 8 (build-image.sh) ---
+out/
+*.vhdx
+*.vdi
+*.qcow2

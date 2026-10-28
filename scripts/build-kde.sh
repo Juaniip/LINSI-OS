@@ -172,8 +172,42 @@ fetch() {
         log "ya descargado: ${out}"
         return 0
     fi
+    if [[ "${url}" == https://download.kde.org/* ]]; then
+        _fetch_kde "${url}" "${out}"
+        return 0
+    fi
     log "descargando ${out}"
     wget -c -O "${out}.part" "${url}"
+    mv "${out}.part" "${out}"
+}
+
+# download.kde.org es un redirector (MirrorBrain) que elige mirror por
+# GeoIP. Bug real (2026-10-27, print-manager y kpipewire): desde acá manda
+# siempre a linorg.usp.br, que no responde (wget se queda en "Connection
+# timed out"). El .sha256 en cambio lo sirve download.kde.org directo, sin
+# redirigir. Entonces: el sha256 oficial sale siempre de download.kde.org,
+# el tarball se baja de KDE_FALLBACK_MIRROR (misma ruta) y, si falla, del
+# redirector; en los dos casos tiene que coincidir con ese sha256 (antes los
+# tarballs de KDE no se verificaban contra nada).
+_fetch_kde() {
+    local url="$1" out="$2"
+    local path="${url#https://download.kde.org/}"
+    local expected
+    expected="$(wget -qO- "${url}.sha256" | awk '{print $1}')"
+    [[ "${expected}" =~ ^[0-9a-f]{64}$ ]] \
+        || die "no se pudo leer el sha256 oficial de ${url}.sha256"
+
+    log "descargando ${out} (${KDE_FALLBACK_MIRROR})"
+    rm -f "${out}.part"
+    if ! wget --timeout=30 --tries=2 -O "${out}.part" "${KDE_FALLBACK_MIRROR}/${path}"; then
+        log "falló ${KDE_FALLBACK_MIRROR} -- probando el redirector de download.kde.org"
+        rm -f "${out}.part"
+        wget --timeout=30 --tries=2 -O "${out}.part" "${url}" \
+            || die "no se pudo descargar ${url} de ningún mirror"
+    fi
+    echo "${expected}  ${out}.part" | sha256sum -c --quiet - \
+        || { rm -f "${out}.part"; die "sha256 de ${out} no coincide con el oficial (${expected})"; }
+    log "sha256 OK contra download.kde.org: ${expected}"
     mv "${out}.part" "${out}"
 }
 
@@ -2665,14 +2699,40 @@ def patch_file(relpath, replacements):
         f.write(content)
     print(f"OK: {path} parcheado ({len(replacements)} reemplazos)")
 
-# src/plasma/private/theme_p.cpp -- 4 reemplazos (el #include + 3 usos:
-# compositingActive, el connect() de compositingChanged, y el bloque
-# entero de BlurEffectWatcher -- éste último descubierto en un segundo
-# intento de build real: BlurEffectWatcher sólo implementa su método
-# virtual puro heredado, QAbstractNativeEventFilter::nativeEventFilter,
-# adentro de un "#if HAVE_X11" en su propio header -- con HAVE_X11=0 queda
-# una clase abstracta, y el "new BlurEffectWatcher()" de este archivo NO
-# estaba guardeado: "invalid new-expression of abstract class type" real).
+# src/plasma/private/theme_p.cpp -- 3 reemplazos (el #include + 2 usos:
+# compositingActive y el connect() de compositingChanged).
+#
+# CORREGIDO 2026-10-27 (primer arranque real, QEMU): antes había un 4º
+# reemplazo que metía en "#if HAVE_X11" el bloque que crea el
+# BlurEffectWatcher, para salvar "invalid new-expression of abstract class
+# type" (la clase sólo implementa nativeEventFilter, virtual pura de
+# QAbstractNativeEventFilter, bajo HAVE_X11). Pero ese constructor TAMBIÉN
+# tiene la rama Wayland (BackgroundEffectManager), y la línea 188
+# (updateKSvgSelectors) hace s_blurEffectWatcher->isEffectActive() sin
+# chequear: con el puntero nulo, kwin_wayland, plasma-login-greeter y
+# plasma-login-wallpaper morían los tres con SEGV en
+# Plasma::BlurEffectWatcher::isEffectActive() (libPlasma.so+0x58a50, leyendo
+# 0x28) -- pantalla negra en vez del login. El arreglo correcto está en el
+# header (ver blureffectwatcher_p.h más abajo): sin X11, nativeEventFilter
+# devuelve false y la clase deja de ser abstracta; la creación queda como en
+# upstream.
+patch_file("src/plasma/private/blureffectwatcher_p.h", [
+    (
+        "#if HAVE_X11\n"
+        "    bool nativeEventFilter(const QByteArray &eventType, void *message, qintptr *) override;\n"
+        "#endif\n",
+        "#if HAVE_X11\n"
+        "    bool nativeEventFilter(const QByteArray &eventType, void *message, qintptr *) override;\n"
+        "#else\n"
+        "    // LINSI-OS: sin X11 no hay eventos nativos que filtrar; esto evita que\n"
+        "    // la clase quede abstracta (y que theme_p.cpp no pueda crearla).\n"
+        "    bool nativeEventFilter(const QByteArray &, void *, qintptr *) override\n"
+        "    {\n"
+        "        return false;\n"
+        "    }\n"
+        "#endif\n",
+    ),
+])
 patch_file("src/plasma/private/theme_p.cpp", [
     (
         "#include <KX11Extras>\n",
@@ -2695,26 +2755,6 @@ patch_file("src/plasma/private/theme_p.cpp", [
         "#if HAVE_X11\n"
         "    if (KWindowSystem::isPlatformX11()) {\n"
         "        connect(KX11Extras::self(), &KX11Extras::compositingChanged, selectorsUpdateTimer, qOverload<>(&QTimer::start));\n"
-        "    }\n"
-        "#endif\n",
-    ),
-    (
-        "    if (QPixmap::defaultDepth() > 8) {\n"
-        "        // watch for background contrast effect property changes as well\n"
-        "        if (!s_blurEffectWatcher) {\n"
-        "            s_blurEffectWatcher = new BlurEffectWatcher();\n"
-        "        }\n"
-        "\n"
-        "        QObject::connect(s_blurEffectWatcher, &BlurEffectWatcher::effectChanged, selectorsUpdateTimer, qOverload<>(&QTimer::start));\n"
-        "    }\n",
-        "#if HAVE_X11\n"
-        "    if (QPixmap::defaultDepth() > 8) {\n"
-        "        // watch for background contrast effect property changes as well\n"
-        "        if (!s_blurEffectWatcher) {\n"
-        "            s_blurEffectWatcher = new BlurEffectWatcher();\n"
-        "        }\n"
-        "\n"
-        "        QObject::connect(s_blurEffectWatcher, &BlurEffectWatcher::effectChanged, selectorsUpdateTimer, qOverload<>(&QTimer::start));\n"
         "    }\n"
         "#endif\n",
     ),
@@ -2940,7 +2980,7 @@ patch_file("src/declarativeimports/core/windowthumbnail.cpp", [
     ),
 ])
 
-print("OK: los 5 archivos de libplasma parcheados (KX11Extras/KWindowInfo guardeados con HAVE_X11)")
+print("OK: los 6 archivos de libplasma parcheados (KX11Extras/KWindowInfo guardeados con HAVE_X11; BlurEffectWatcher concreto sin X11)")
 PYEOF
 }
 step_verify_libplasma() { _kf6_verify_lib Plasma libPlasma.so; }
@@ -4758,9 +4798,16 @@ step_verify_icu() {
 # compila igual sin ninguno, sólo con los backends deshabilitados (no
 # hace falta audio/video funcional de verdad, sólo que exista el target
 # CMake "Qt6::Multimedia" para que qtspeech deje de saltearse).
+# CORREGIDO 2026-10-27: ese build "sin backends" dejaba a TODAS las apps Qt
+# sin audio ni video (Konsole lo pide REQUIRED para la campana). Ahora FFmpeg
+# se compila antes (step_ffmpeg) y el backend se fuerza con
+# -DFEATURE_ffmpeg=ON: si FFmpeg no se encuentra, falla acá en vez de
+# instalar otra vez un Qt Multimedia mudo sin avisar.
 step_qtmultimedia() {
     require_toolchain
     require_qtbase
+    [[ -e "${LFS_SYSROOT}/usr/lib/libavcodec.so" ]] \
+        || die "falta FFmpeg -- corré primero: scripts/build-kde.sh libva && scripts/build-kde.sh ffmpeg"
     log "Qt6 (qtmultimedia) ${QT6_VERSION} para ${LFS_TGT} — build CRUZADO"
 
     cd "${LFS_SOURCES}"
@@ -4785,14 +4832,21 @@ step_qtmultimedia() {
         -DCMAKE_INSTALL_PREFIX=/usr \
         -DCMAKE_BUILD_TYPE=Release \
         -DQT_BUILD_EXAMPLES=OFF \
-        -DQT_BUILD_TESTS=OFF
+        -DQT_BUILD_TESTS=OFF \
+        -DFEATURE_ffmpeg=ON
 
     ninja -C "${bdir}" ${MAKEFLAGS}
     DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
 
     log "qtmultimedia instalado en ${LFS_SYSROOT}/usr"
 }
-step_verify_qtmultimedia() { _kf6_verify_lib qtmultimedia libQt6Multimedia.so; }
+step_verify_qtmultimedia() {
+    _kf6_verify_lib qtmultimedia libQt6Multimedia.so
+    local p
+    p="$(find "${LFS_SYSROOT}/usr/lib/plugins/multimedia" -name '*ffmpeg*.so' -print -quit 2>/dev/null)"
+    [[ -n "${p}" ]] || die "qtmultimedia no instaló el backend FFmpeg en ${LFS_SYSROOT}/usr/lib/plugins/multimedia"
+    echo "  [OK] ${p}"
+}
 require_qtmultimedia() {
     [[ -e "${LFS_SYSROOT}/usr/lib/libQt6Multimedia.so" ]] \
         || die "no está qtmultimedia en el sysroot -- corré primero: scripts/build-kde.sh qtmultimedia"
@@ -7176,8 +7230,24 @@ step_cups() {
 
     make ${MAKEFLAGS}
     make DESTDIR="${LFS_SYSROOT}" install
+    _cups_pam
 
     log "CUPS instalado en ${LFS_SYSROOT}/usr"
+}
+# /etc/pam.d/cups (error real 2026-10-27, Fase 8): el configure de CUPS ve
+# /etc/pam.d/common-auth y elige su plantilla de Debian, que usa
+# "@include" -- un parche de Debian que el Linux-PAM original rechaza
+# (ver step_pam_config en build-comms.sh). Se reescribe con la sintaxis
+# original: cupsd sólo pide autenticar y validar la cuenta.
+_cups_pam() {
+    install -d "${LFS_SYSROOT}/etc/pam.d"
+    # CUPS lo instala 0444 (error real: "Permission denied" al reescribirlo).
+    rm -f "${LFS_SYSROOT}/etc/pam.d/cups"
+    cat > "${LFS_SYSROOT}/etc/pam.d/cups" <<'EOF'
+# LINSI-OS -- autenticación de cupsd (tareas administrativas de impresión)
+auth       include    common-auth
+account    include    common-account
+EOF
 }
 step_verify_cups() {
     log "Verificación: libcups, cupsd, cups-config y unidad systemd"
@@ -7337,6 +7407,406 @@ step_verify_print_manager() {
     [[ -n "${p}" ]] || die "no se encontró el KCM de print-manager"
     echo "  [OK] ${p}"
     log "OK: print-manager completo en el sysroot."
+}
+
+# ==============================================================================
+# Multimedia, kpipewire y aplicaciones base (2026-10-27)
+# ==============================================================================
+# kpipewire (Plasma 6.7.4) pide FFmpeg y libva/libva-drm con
+# pkg_check_modules(... REQUIRED). No lo pide ningún paquete en tiempo de
+# build (kwin sólo para tests), pero es dependencia de RUNTIME: el import QML
+# "org.kde.pipewire" lo usan PipeWireDelegate.qml de xdg-desktop-portal-kde
+# (selector de pantalla/ventana al compartir pantalla), PipeWireThumbnail.qml
+# del taskmanager de plasma-desktop y el applet cameraindicator de
+# plasma-workspace. Sin él, compartir pantalla en una videollamada no tiene
+# selector.
+#
+# libva y FFmpeg sólo dependen de libdrm/zlib (fases anteriores), así que en
+# "all" van ANTES de qtmultimedia, que ahora exige el backend FFmpeg (ver
+# step_qtmultimedia).
+
+# libva 2.24.1 -- sólo libva + libva-drm, que es lo que piden FFmpeg y
+# kpipewire. X11/GLX en "no" (Wayland puro); Wayland también en "no": libva-
+# wayland sólo lo usan reproductores que presentan superficies VA directo en
+# Wayland, y obligaría a pasar el wayland-scanner nativo por --native-file.
+# Los drivers VA (Mesa -Dgallium-va, intel-media-driver) todavía NO existen:
+# Mesa se compiló con gallium-va disabled porque no había libva. Sin driver,
+# libva carga pero no hay aceleración por hardware -- ver PENDIENTES.md.
+step_libva() {
+    require_toolchain
+    log "libva ${LIBVA_VERSION} para ${LFS_TGT} — Meson+Ninja"
+
+    cd "${LFS_SOURCES}"
+    fetch "${LIBVA_MIRROR}/libva-${LIBVA_VERSION}.tar.bz2" "libva-${LIBVA_VERSION}.tar.bz2"
+    log_sha256 "${LFS_SOURCES}/libva-${LIBVA_VERSION}.tar.bz2"
+    extract_once "${LFS_SOURCES}/libva-${LIBVA_VERSION}.tar.bz2" \
+                 "${LFS_BUILD}/.extracted-libva-${LIBVA_VERSION}"
+
+    local src="${LFS_BUILD}/libva-${LIBVA_VERSION}"
+    local crossfile="${LFS_BUILD}/meson-cross-linsi.ini"
+    write_meson_crossfile "${crossfile}"
+
+    local bdir="${src}/build"
+    rm -rf "${bdir}"
+
+    meson setup "${bdir}" "${src}" \
+        --cross-file="${crossfile}" \
+        --prefix=/usr \
+        --libdir=lib \
+        --buildtype=release \
+        -Ddriverdir=/usr/lib/dri \
+        -Ddisable_drm=false \
+        -Dwith_x11=no \
+        -Dwith_glx=no \
+        -Dwith_wayland=no \
+        -Dwith_win32=no \
+        -Denable_docs=false
+
+    ninja -C "${bdir}" ${MAKEFLAGS}
+    DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
+    merge_doubled_sysroot
+
+    log "libva instalado en ${LFS_SYSROOT}/usr"
+}
+step_verify_libva() {
+    _kf6_verify_lib libva libva.so
+    _kf6_verify_lib libva-drm libva-drm.so
+}
+
+# FFmpeg 9.0.2 -- configure propio (no Autotools). Criterios:
+#   - LGPL: sin --enable-gpl ni --enable-nonfree.
+#   - --disable-autodetect: FFmpeg prende solo cualquier librería que
+#     encuentre (xlib, libxcb, sdl2, alsa...). Con esto el resultado no
+#     depende de lo que haya en el sysroot ese día; se prende a mano sólo lo
+#     que se usa. pthreads e iconv entran en esa misma lista, por eso van
+#     explícitos.
+#   - Sin programas (ffmpeg/ffprobe) ni libavdevice: kpipewire y qtmultimedia
+#     usan avcodec/avformat/avfilter/avutil/swscale/swresample.
+#   - --cross-prefix sin ruta absoluta: la línea de configure queda grabada
+#     en libavutil (avutil_configuration()); ${LFS_TOOLS}/bin ya está en PATH
+#     (env.sh), así que no hace falta meter /lfs/tools en el binario.
+step_ffmpeg() {
+    require_toolchain
+    [[ -e "${LFS_SYSROOT}/usr/lib/libva-drm.so" ]] \
+        || die "falta libva -- corré primero: scripts/build-kde.sh libva"
+    command -v nasm >/dev/null \
+        || die "falta nasm en el contenedor -- reconstruí la imagen (Dockerfile, ítem 16)"
+    log "FFmpeg ${FFMPEG_VERSION} para ${LFS_TGT} — configure"
+
+    cd "${LFS_SOURCES}"
+    fetch "${FFMPEG_MIRROR}/ffmpeg-${FFMPEG_VERSION}.tar.xz" "ffmpeg-${FFMPEG_VERSION}.tar.xz"
+    log_sha256 "${LFS_SOURCES}/ffmpeg-${FFMPEG_VERSION}.tar.xz"
+    extract_once "${LFS_SOURCES}/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
+                 "${LFS_BUILD}/.extracted-ffmpeg-${FFMPEG_VERSION}"
+
+    local src="${LFS_BUILD}/ffmpeg-${FFMPEG_VERSION}"
+    local bdir="${src}/build"
+    rm -rf "${bdir}"
+    mkdir -p "${bdir}"
+    cd "${bdir}"
+
+    PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig:${LFS_SYSROOT}/usr/share/pkgconfig" \
+    PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
+    ../configure \
+        --prefix=/usr \
+        --libdir=/usr/lib \
+        --shlibdir=/usr/lib \
+        --enable-cross-compile \
+        --cross-prefix="${LFS_TGT}-" \
+        --arch=x86_64 \
+        --target-os=linux \
+        --pkg-config=pkg-config \
+        --enable-shared \
+        --disable-static \
+        --disable-programs \
+        --disable-doc \
+        --disable-avdevice \
+        --disable-autodetect \
+        --enable-pthreads \
+        --enable-iconv \
+        --enable-zlib \
+        --enable-libdrm \
+        --enable-vaapi
+
+    make ${MAKEFLAGS}
+    make DESTDIR="${LFS_SYSROOT}" install
+
+    log "FFmpeg instalado en ${LFS_SYSROOT}/usr"
+}
+step_verify_ffmpeg() {
+    local l
+    for l in avcodec avformat avfilter avutil swscale swresample; do
+        _kf6_verify_lib "lib${l}" "lib${l}.so"
+    done
+}
+
+# kpipewire -- Plasma 6.7.4.
+step_kpipewire() {
+    [[ -e "${LFS_SYSROOT}/usr/lib/libavcodec.so" ]] \
+        || die "falta FFmpeg -- corré primero: scripts/build-kde.sh ffmpeg"
+    _plasma_cmake_build KPipeWire kpipewire
+}
+step_verify_kpipewire() {
+    _kf6_verify_lib KPipeWire libKPipeWire.so
+    local q="${LFS_SYSROOT}/usr/lib/qml/org/kde/pipewire/qmldir"
+    [[ -f "${q}" ]] || die "falta el módulo QML org.kde.pipewire (${q})"
+    echo "  [OK] ${q}"
+}
+
+# KPty y KFileMetaData -- frameworks (KDE_VERSION) que faltaban: KPty lo pide
+# Konsole, KFileMetaData lo pide Dolphin (TYPE REQUIRED). Los extractores de
+# KFileMetaData son todos opcionales; con FFmpeg ya instalado entra el de
+# audio/video, el resto (taglib, exiv2, poppler, epub...) queda afuera.
+# KPty: utempter (OPTIONAL) sólo registra cada terminal en utmp (lo que
+# muestra "who"); no está en el sysroot. Su FindUTEMPTER.cmake corta el
+# configure en cross ("You must set UTEMPTER_EXECUTABLE or
+# CMAKE_DISABLE_FIND_PACKAGE_UTEMPTER when cross-compiling", error real).
+step_kpty()          { _kf6_cmake_build KF6Pty kpty -DCMAKE_DISABLE_FIND_PACKAGE_UTEMPTER=ON; }
+step_verify_kpty()   { _kf6_verify_lib KF6Pty libKF6Pty.so; }
+step_kfilemetadata() { _kf6_cmake_build KF6FileMetaData kfilemetadata; }
+step_verify_kfilemetadata() { _kf6_verify_lib KF6FileMetaData libKF6FileMetaData.so; }
+
+# KDE Gear (release-service) -- mismo esquema que Plasma (CMake+ECM, tarball
+# por paquete) con otra versión y otro mirror. Se reusa _plasma_cmake_build
+# pisando PLASMA_VERSION/PLASMA_MIRROR con "local": bash tiene alcance
+# dinámico, así que la función llamada ve los valores de Gear (y su hook de
+# patch y merge_doubled_sysroot sin duplicar código).
+_gear_cmake_build() {
+    local PLASMA_VERSION="${KDE_GEAR_VERSION}"
+    local PLASMA_MIRROR="${KDE_GEAR_MIRROR}"
+    _plasma_cmake_build "$@"
+}
+
+# Konsole 26.08.2. WITH_X11 (ON por default) apagado. WITH_LIBSSH sólo sirve
+# para que el plugin SSHManager lea ~/.ssh/config; el ssh en sí no lo usa.
+# Queda apagado para no sumar libssh por eso.
+step_konsole() {
+    [[ -e "${LFS_SYSROOT}/usr/lib/libKF6Pty.so" ]] \
+        || die "falta KPty -- corré primero: scripts/build-kde.sh kpty"
+    _gear_cmake_build Konsole konsole -DWITH_LIBSSH=OFF -DBUILD_DOC=OFF
+}
+step_verify_konsole() {
+    local b="${LFS_SYSROOT}/usr/bin/konsole"
+    [[ -x "${b}" ]] || die "falta ${b}"
+    echo "  [OK] ${b}"
+}
+
+# Dolphin 26.08.2. Baloo (búsqueda/etiquetas y panel de información) es
+# opcional y queda afuera por ahora (ver opcionales en PENDIENTES.md).
+# Bug de upstream (error real: "fatal error: KStartupInfo: No such file or
+# directory"): el CMakeLists.txt hace set(HAVE_X11 TRUE) en cualquier Unix,
+# sin opción ni find_package. Todo su código X11 (KStartupInfo,
+# qtx11extras_p.h) ya está detrás de #if HAVE_X11 con la rama Wayland al
+# lado, así que alcanza con apagar el flag.
+_patch_dolphin() {
+    _replace_once "$1/CMakeLists.txt" \
+        "    set(HAVE_X11 TRUE)" \
+        "    set(HAVE_X11 FALSE) # LINSI-OS: Wayland puro"
+}
+step_dolphin() {
+    [[ -e "${LFS_SYSROOT}/usr/lib/libKF6FileMetaData.so" ]] \
+        || die "falta KFileMetaData -- corré primero: scripts/build-kde.sh kfilemetadata"
+    _gear_cmake_build Dolphin dolphin -DBUILD_DOC=OFF
+}
+step_verify_dolphin() {
+    local b="${LFS_SYSROOT}/usr/bin/dolphin"
+    [[ -x "${b}" ]] || die "falta ${b}"
+    echo "  [OK] ${b}"
+}
+
+# shared-mime-info 2.5.1 (agregado 2026-10-27, Fase 8) -- la base de datos
+# de tipos MIME de freedesktop.org. No estaba: sin ella QMimeDatabase/KIO no
+# reconocen NINGÚN tipo de archivo (todo es application/octet-stream), así
+# que Dolphin no puede asociar programas ni íconos. Meson; update-mimedb en
+# false porque con DESTDIR no tiene sentido -- el caché (mime.cache y
+# compañía) lo genera build-image.sh corriendo update-mime-database adentro
+# del rootfs. El tarball sale del archive de GitLab (no hay tarball de dist).
+step_shared_mime_info() {
+    require_toolchain
+    log "shared-mime-info ${SHARED_MIME_INFO_VERSION} para ${LFS_TGT} — Meson+Ninja"
+
+    cd "${LFS_SOURCES}"
+    fetch "${SHARED_MIME_INFO_MIRROR}/shared-mime-info-${SHARED_MIME_INFO_VERSION}.tar.gz" \
+          "shared-mime-info-${SHARED_MIME_INFO_VERSION}.tar.gz"
+    log_sha256 "${LFS_SOURCES}/shared-mime-info-${SHARED_MIME_INFO_VERSION}.tar.gz"
+    extract_once "${LFS_SOURCES}/shared-mime-info-${SHARED_MIME_INFO_VERSION}.tar.gz" \
+                 "${LFS_BUILD}/.extracted-shared-mime-info-${SHARED_MIME_INFO_VERSION}"
+
+    local src="${LFS_BUILD}/shared-mime-info-${SHARED_MIME_INFO_VERSION}"
+    local crossfile="${LFS_BUILD}/meson-cross-linsi.ini"
+    write_meson_crossfile "${crossfile}"
+
+    local bdir="${src}/build"
+    rm -rf "${bdir}"
+
+    meson setup "${bdir}" "${src}" \
+        --cross-file="${crossfile}" \
+        --prefix=/usr \
+        --libdir=lib \
+        --buildtype=release \
+        -Dupdate-mimedb=false \
+        -Dbuild-tools=true \
+        -Dbuild-translations=true \
+        -Dbuild-tests=false \
+        -Dbuild-spec=false
+
+    ninja -C "${bdir}" ${MAKEFLAGS}
+    DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
+    merge_doubled_sysroot
+
+    log "shared-mime-info instalado en ${LFS_SYSROOT}/usr"
+}
+step_verify_shared_mime_info() {
+    local p
+    for p in "${LFS_SYSROOT}/usr/share/mime/packages/freedesktop.org.xml" \
+             "${LFS_SYSROOT}/usr/bin/update-mime-database"; do
+        [[ -e "${p}" ]] || die "falta ${p}"
+        echo "  [OK] ${p}"
+    done
+}
+
+# ==============================================================================
+# Fuentes y configuración por defecto del escritorio (2026-10-27)
+# ==============================================================================
+# El sysroot no tenía NINGUNA fuente (/usr/share/fonts no existía): Plasma
+# hubiera arrancado sin poder dibujar texto. plasma-integration
+# (kfontsettingsdata.cpp) usa por defecto "Noto Sans" 10 para la interfaz y
+# "Hack" 10 para monoespaciada. Se instala Noto Sans tal cual y, en vez de
+# Hack, Hack Nerd Font (la misma Hack con los glifos de íconos de Nerd Fonts,
+# para prompts de shell y herramientas de terminal); /etc/xdg/kdeglobals la
+# deja como monoespaciada del sistema.
+
+# Noto Sans 2.015 -- notofonts/latin-greek-cyrillic. El zip trae unhinted,
+# hinted y variables; se instala sólo hinted/ttf (todos los pesos), que es lo
+# que mejor se ve en pantallas de baja densidad del laboratorio.
+step_font_noto() {
+    log "Noto Sans ${NOTO_SANS_VERSION} -- fuente de interfaz de Plasma"
+    cd "${LFS_SOURCES}"
+    fetch "${NOTO_SANS_MIRROR}/NotoSans-v${NOTO_SANS_VERSION}.zip" "NotoSans-v${NOTO_SANS_VERSION}.zip"
+    log_sha256 "${LFS_SOURCES}/NotoSans-v${NOTO_SANS_VERSION}.zip"
+
+    local tmp="${LFS_BUILD}/noto-sans-${NOTO_SANS_VERSION}"
+    rm -rf "${tmp}"
+    mkdir -p "${tmp}"
+    unzip -q "${LFS_SOURCES}/NotoSans-v${NOTO_SANS_VERSION}.zip" 'NotoSans/hinted/ttf/*' 'OFL.txt' -d "${tmp}"
+
+    local dst="${LFS_SYSROOT}/usr/share/fonts/noto"
+    rm -rf "${dst}"
+    install -d -m 0755 "${dst}"
+    install -m 0644 "${tmp}"/NotoSans/hinted/ttf/*.ttf "${dst}/"
+    install -D -m 0644 "${tmp}/OFL.txt" "${LFS_SYSROOT}/usr/share/licenses/noto-sans/OFL.txt"
+    rm -rf "${tmp}"
+
+    log "Noto Sans instalada en ${dst}"
+}
+step_verify_font_noto() {
+    local f="${LFS_SYSROOT}/usr/share/fonts/noto/NotoSans-Regular.ttf"
+    [[ -f "${f}" ]] || die "falta ${f}"
+    echo "  [OK] $(find "${LFS_SYSROOT}/usr/share/fonts/noto" -name '*.ttf' | wc -l) archivos en ${LFS_SYSROOT}/usr/share/fonts/noto"
+}
+
+# Hack Nerd Font 3.5.1 -- ryanoasis/nerd-fonts. Se instalan las variantes
+# "Hack Nerd Font" (íconos de ancho doble) y "Hack Nerd Font Mono" (íconos de
+# una celda, la correcta para terminales); "Propo" (proporcional) no.
+step_font_hack_nerd() {
+    log "Hack Nerd Font ${NERD_FONTS_VERSION} -- fuente monoespaciada"
+    cd "${LFS_SOURCES}"
+    fetch "${NERD_FONTS_MIRROR}/Hack.tar.xz" "nerd-fonts-Hack-${NERD_FONTS_VERSION}.tar.xz"
+    log_sha256 "${LFS_SOURCES}/nerd-fonts-Hack-${NERD_FONTS_VERSION}.tar.xz"
+
+    local tmp="${LFS_BUILD}/nerd-fonts-hack-${NERD_FONTS_VERSION}"
+    rm -rf "${tmp}"
+    mkdir -p "${tmp}"
+    tar -xf "${LFS_SOURCES}/nerd-fonts-Hack-${NERD_FONTS_VERSION}.tar.xz" -C "${tmp}"
+
+    local dst="${LFS_SYSROOT}/usr/share/fonts/nerd-fonts"
+    rm -rf "${dst}"
+    install -d -m 0755 "${dst}"
+    install -m 0644 "${tmp}"/HackNerdFont-*.ttf "${tmp}"/HackNerdFontMono-*.ttf "${dst}/"
+    install -D -m 0644 "${tmp}/LICENSE.md" "${LFS_SYSROOT}/usr/share/licenses/nerd-fonts-hack/LICENSE.md"
+    rm -rf "${tmp}"
+
+    log "Hack Nerd Font instalada en ${dst}"
+}
+step_verify_font_hack_nerd() {
+    local f="${LFS_SYSROOT}/usr/share/fonts/nerd-fonts/HackNerdFontMono-Regular.ttf"
+    [[ -f "${f}" ]] || die "falta ${f}"
+    echo "  [OK] $(find "${LFS_SYSROOT}/usr/share/fonts/nerd-fonts" -name '*.ttf' | wc -l) archivos en ${LFS_SYSROOT}/usr/share/fonts/nerd-fonts"
+}
+
+# Configuración por defecto para TODOS los usuarios, en /etc/xdg (y no en
+# /etc/skel): KConfig la lee como capa de defaults, así que vale también para
+# usuarios que ya existen, para el usuario del greeter y para los que se creen
+# por fuera de useradd; cada usuario puede cambiarla desde Preferencias.
+#   - kdeglobals [KDE] LookAndFeelPackage: startplasma (startplasma.cpp,
+#     setupPlasmaEnvironment) carga ese paquete en el primer inicio de sesión
+#     y vuelca sus defaults (esquema de colores BreezeDark incluido) en
+#     ~/.config/kdedefaults. org.kde.breezedark.desktop lo instala
+#     plasma-workspace.
+#   - kdeglobals [General] font/fixed: mismo formato que escribe el KCM de
+#     fuentes (QFont::toString de Qt 6).
+#   - kxkbrc [Layout]: kwin (src/xkb.cpp, loadKeymapFromConfig) lee Model,
+#     LayoutList y VariantList. Model=pc105 porque el default de kwin es
+#     pc104, que no tiene la tecla "< >" de los teclados ISO latinoamericanos.
+#   - /etc/fonts/local.conf: la incluye 51-local.conf (ya habilitado por
+#     fontconfig). Alias genéricos para apps que no leen kdeglobals.
+step_desktop_defaults() {
+    log "Configuración por defecto del escritorio en ${LFS_SYSROOT}/etc"
+
+    install -d -m 0755 "${LFS_SYSROOT}/etc/xdg" "${LFS_SYSROOT}/etc/fonts"
+
+    cat > "${LFS_SYSROOT}/etc/xdg/kdeglobals" <<EOF
+[KDE]
+LookAndFeelPackage=org.kde.breezedark.desktop
+
+[General]
+font=Noto Sans,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+fixed=Hack Nerd Font Mono,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+EOF
+
+    cat > "${LFS_SYSROOT}/etc/xdg/kxkbrc" <<EOF
+[Layout]
+Use=true
+Model=pc105
+LayoutList=${LINSI_KEYBOARD_LAYOUT}
+VariantList=
+EOF
+
+    cat > "${LFS_SYSROOT}/etc/fonts/local.conf" <<'EOF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<!-- LINSI-OS: fuentes por defecto (ver step_desktop_defaults en build-kde.sh) -->
+<fontconfig>
+  <alias>
+    <family>sans-serif</family>
+    <prefer><family>Noto Sans</family></prefer>
+  </alias>
+  <alias>
+    <family>monospace</family>
+    <prefer><family>Hack Nerd Font Mono</family></prefer>
+  </alias>
+</fontconfig>
+EOF
+    chmod 0644 "${LFS_SYSROOT}/etc/xdg/kdeglobals" "${LFS_SYSROOT}/etc/xdg/kxkbrc" \
+               "${LFS_SYSROOT}/etc/fonts/local.conf"
+
+    log "Defaults escritos (teclado: ${LINSI_KEYBOARD_LAYOUT}, tema: Breeze oscuro)"
+}
+step_verify_desktop_defaults() {
+    local f
+    for f in etc/xdg/kdeglobals etc/xdg/kxkbrc etc/fonts/local.conf; do
+        [[ -f "${LFS_SYSROOT}/${f}" ]] || die "falta ${LFS_SYSROOT}/${f}"
+        echo "  [OK] ${LFS_SYSROOT}/${f}"
+    done
+    [[ -d "${LFS_SYSROOT}/usr/share/plasma/look-and-feel/org.kde.breezedark.desktop" ]] \
+        || die "kdeglobals apunta a org.kde.breezedark.desktop, que no está instalado"
+    grep -q "^LayoutList=${LINSI_KEYBOARD_LAYOUT}\$" "${LFS_SYSROOT}/etc/xdg/kxkbrc" \
+        || die "kxkbrc no tiene LayoutList=${LINSI_KEYBOARD_LAYOUT}"
+    # /usr/share/X11/xkb es un symlink ABSOLUTO a /usr/share/xkeyboard-config-2
+    # (correcto en el sistema final, roto visto desde el contenedor).
+    [[ -f "${LFS_SYSROOT}/usr/share/xkeyboard-config-2/symbols/${LINSI_KEYBOARD_LAYOUT}" ]] \
+        || die "el layout ${LINSI_KEYBOARD_LAYOUT} no existe en xkeyboard-config"
+    echo "  [OK] layout ${LINSI_KEYBOARD_LAYOUT} presente en xkeyboard-config"
 }
 
 # ------------------------------------------------------------------------------
@@ -8038,6 +8508,7 @@ main() {
         verify-pdfio)             step_verify_pdfio ;;
         cups)                     step_cups ;;
         verify-cups)              step_verify_cups ;;
+        cups-pam)                 _cups_pam ;;
         libcupsfilters)           step_libcupsfilters ;;
         verify-libcupsfilters)    step_verify_libcupsfilters ;;
         libppd)                   step_libppd ;;
@@ -8046,6 +8517,28 @@ main() {
         verify-cups-filters)      step_verify_cups_filters ;;
         print-manager)            step_print_manager ;;
         verify-print-manager)     step_verify_print_manager ;;
+        libva)                    step_libva ;;
+        verify-libva)             step_verify_libva ;;
+        ffmpeg)                   step_ffmpeg ;;
+        verify-ffmpeg)            step_verify_ffmpeg ;;
+        kpipewire)                step_kpipewire ;;
+        verify-kpipewire)         step_verify_kpipewire ;;
+        kpty)                     step_kpty ;;
+        verify-kpty)              step_verify_kpty ;;
+        kfilemetadata)            step_kfilemetadata ;;
+        verify-kfilemetadata)     step_verify_kfilemetadata ;;
+        konsole)                  step_konsole ;;
+        verify-konsole)           step_verify_konsole ;;
+        dolphin)                  step_dolphin ;;
+        verify-dolphin)           step_verify_dolphin ;;
+        shared-mime-info)         step_shared_mime_info ;;
+        verify-shared-mime-info)  step_verify_shared_mime_info ;;
+        font-noto)                step_font_noto ;;
+        verify-font-noto)         step_verify_font_noto ;;
+        font-hack-nerd)           step_font_hack_nerd ;;
+        verify-font-hack-nerd)    step_verify_font_hack_nerd ;;
+        desktop-defaults)         step_desktop_defaults ;;
+        verify-desktop-defaults)  step_verify_desktop_defaults ;;
         libplasma)                step_libplasma ;;
         verify-libplasma)         step_verify_libplasma ;;
         kwayland)                 step_kwayland ;;
@@ -8243,6 +8736,8 @@ main() {
             step_icu_native
             step_icu;              step_verify_icu
             step_qtlocation;       step_verify_qtlocation
+            step_libva;            step_verify_libva
+            step_ffmpeg;           step_verify_ffmpeg
             step_qtmultimedia;     step_verify_qtmultimedia
             step_qtspeech;         step_verify_qtspeech
             step_libqrencode;      step_verify_libqrencode
@@ -8297,6 +8792,15 @@ main() {
             step_cups_filters;     step_verify_cups_filters
             step_print_manager;    step_verify_print_manager
             step_xdg_desktop_portal_kde; step_verify_xdg_desktop_portal_kde
+            step_kpipewire;        step_verify_kpipewire
+            step_kpty;             step_verify_kpty
+            step_kfilemetadata;    step_verify_kfilemetadata
+            step_konsole;          step_verify_konsole
+            step_dolphin;          step_verify_dolphin
+            step_shared_mime_info; step_verify_shared_mime_info
+            step_font_noto;        step_verify_font_noto
+            step_font_hack_nerd;   step_verify_font_hack_nerd
+            step_desktop_defaults; step_verify_desktop_defaults
             log "Fase 6 Parte 3: núcleo de Plasma compilado; escritorio usable en curso -- ver docs/PENDIENTES.md."
             ;;
         *)

@@ -907,28 +907,48 @@ step_uutils() {
     local src="${LFS_BUILD}/coreutils-${UUTILS_VERSION}"
     cd "${src}"
 
+    # --features unix (CORREGIDO 2026-10-27, Fase 8): el default de uutils es
+    # sólo "feat_common_core"; chmod/chown/chgrp/chroot/kill/id/install y el
+    # resto de las utilidades que necesitan Unix están en feat_require_unix,
+    # que sólo entra con "unix" (Cargo.toml real). Sin esto el sistema final
+    # no tenía chmod ni chown.
     RUSTFLAGS="-C linker=${LFS_TGT}-gcc -C link-arg=-fuse-ld=bfd" \
-        cargo build --release --locked --target x86_64-unknown-linux-gnu
+        cargo build --release --locked --target x86_64-unknown-linux-gnu --features unix
 
     local bin="${src}/target/x86_64-unknown-linux-gnu/release/coreutils"
     [[ -f "${bin}" ]] || die "no se generó ${bin} — falló el build de Cargo"
 
     install -v -m755 -D "${bin}" "${LFS_SYSROOT}/usr/bin/coreutils"
-
-    # uutils arma UN binario multicall tipo BusyBox: cada utilidad se invoca
-    # según el nombre con el que se lo llama (argv[0]), así que hacen falta
-    # symlinks — uno por utilidad — apuntando todos al mismo binario. Esta es
-    # una lista curada de las utilidades clásicas de GNU coreutils (no la
-    # lista completa/exhaustiva de uutils, que puede tener más) — alcanza
-    # para "erradicar fallos de memoria" reemplazando lo clásico, tal como
-    # pide la guía; se puede ampliar más adelante sin volver a compilar nada.
-    local utils="arch base32 base64 basename cat cksum comm cp csplit cut date dd df dircolors dirname du echo env expand expr factor false fmt fold groups head hostid id install join link ln logname ls md5sum mkdir mkfifo mknod mktemp mv nice nl nohup nproc numfmt od paste pathchk pinky pr printenv printf pwd readlink realpath rm rmdir runcon seq sha1sum sha224sum sha256sum sha384sum sha512sum shred shuf sleep sort split stat stdbuf stty sum sync tac tail tee test timeout touch tr true truncate tsort tty uname unexpand uniq unlink uptime users wc who whoami yes"
-    local u
-    for u in ${utils}; do
-        ln -sfv coreutils "${LFS_SYSROOT}/usr/bin/${u}"
-    done
+    step_uutils_links
 
     log "uutils instalado en ${LFS_SYSROOT}/usr (binario multicall + symlinks)"
+}
+
+# uutils arma UN binario multicall tipo BusyBox: cada utilidad se invoca
+# según el nombre con el que se lo llama (argv[0]), así que hace falta un
+# symlink por utilidad.
+# CORREGIDO 2026-10-27 (Fase 8): antes era una lista curada a mano que dejaba
+# afuera chmod, chown, chgrp, chroot y "[" -- el sistema final no tenía esos
+# comandos (lo destapó build-image.sh al hacer chown adentro del rootfs). Ahora
+# la lista sale del propio binario ("coreutils --list"), corrido con el loader
+# del sysroot (misma arquitectura que el contenedor). No pisa nada que ya
+# exista (p. ej. "more"/"kill" de util-linux o procps).
+step_uutils_links() {
+    local bin="${LFS_SYSROOT}/usr/bin/coreutils"
+    [[ -x "${bin}" ]] || die "no está ${bin} -- corré primero: scripts/build-userspace.sh uutils"
+    local list
+    list="$("${LFS_SYSROOT}/usr/lib/ld-linux-x86-64.so.2" --library-path "${LFS_SYSROOT}/usr/lib" "${bin}" --list)"
+    [[ -n "${list}" ]] || die "coreutils --list no devolvió nada"
+    local u n=0
+    for u in ${list}; do
+        [[ "${u}" == "coreutils" ]] && continue
+        if [[ -e "${LFS_SYSROOT}/usr/bin/${u}" && ! -L "${LFS_SYSROOT}/usr/bin/${u}" ]]; then
+            continue
+        fi
+        ln -sfn coreutils "${LFS_SYSROOT}/usr/bin/${u}"
+        n=$((n + 1))
+    done
+    log "uutils: ${n} symlinks en ${LFS_SYSROOT}/usr/bin"
 }
 
 step_verify_uutils() {
@@ -938,7 +958,7 @@ step_verify_uutils() {
     file "${bin}"
     "${LFS_TOOLS}/bin/${LFS_TGT}-readelf" -d "${bin}" | grep -i "needed"
     local sample
-    for sample in ls cp mv rm cat; do
+    for sample in ls cp mv rm cat chmod chown chgrp chroot "["; do
         [[ -L "${LFS_SYSROOT}/usr/bin/${sample}" ]] || die "falta el symlink ${sample} -> coreutils"
     done
     log "OK: uutils compilado para ${LFS_TGT}, symlinks de utilidades presentes."
@@ -969,6 +989,7 @@ main() {
         zsh)                    step_zsh ;;
         verify-zsh)             step_verify_zsh ;;
         uutils)                 step_uutils ;;
+        uutils-links)           step_uutils_links ;;
         verify-uutils)          step_verify_uutils ;;
         all)
             step_glibc

@@ -56,11 +56,31 @@ step_configure() {
     log "generando defconfig base para x86_64"
     make ARCH=x86_64 CROSS_COMPILE="${LFS_TGT}-" defconfig
 
-    log "aplicando fragmento de hardening (scripts/kernel-hardening.config)"
-    ./scripts/kconfig/merge_config.sh -m .config "${SCRIPT_DIR}/kernel-hardening.config"
+    log "aplicando fragmentos de hardening y de hardware (scripts/kernel-*.config)"
+    ./scripts/kconfig/merge_config.sh -m .config \
+        "${SCRIPT_DIR}/kernel-hardening.config" \
+        "${SCRIPT_DIR}/kernel-hardware.config"
 
     log "resolviendo dependencias de config (olddefconfig)"
     make ARCH=x86_64 CROSS_COMPILE="${LFS_TGT}-" olddefconfig
+
+    # merge_config.sh -m sólo avisa si un valor pedido no quedó (dependencia
+    # que falta, símbolo renombrado entre versiones); acá se corta. Se mira
+    # después de olddefconfig, que es cuando se resuelven las dependencias.
+    log "controlando que cada opción de los fragmentos haya quedado"
+    local frag line sym want got bad=0
+    for frag in "${SCRIPT_DIR}/kernel-hardening.config" "${SCRIPT_DIR}/kernel-hardware.config"; do
+        while IFS= read -r line; do
+            [[ "${line}" =~ ^(CONFIG_[A-Za-z0-9_]+)=(.*)$ ]] || continue
+            sym="${BASH_REMATCH[1]}" want="${BASH_REMATCH[2]}"
+            got="$(grep -E "^${sym}=" .config | cut -d= -f2- || true)"
+            if [[ "${got}" != "${want}" ]]; then
+                echo "  [NO QUEDÓ] ${sym}: pedido ${want}, quedó '${got:-no seteado}' ($(basename "${frag}"))"
+                bad=1
+            fi
+        done < "${frag}"
+    done
+    [[ "${bad}" -eq 0 ]] || die "hay opciones de los fragmentos que no quedaron en .config (ver arriba)"
 }
 
 step_build() {
@@ -78,11 +98,16 @@ step_build() {
     log "kernel instalado en ${LFS}/boot/vmlinuz-linsi-${LINUX_VERSION}"
 }
 
+# CORREGIDO 2026-10-27: antes era INSTALL_MOD_PATH="${LFS}", que deja los
+# módulos en /lfs/lib/modules -- fuera de cualquier volumen persistente (y
+# fuera de /usr, que es donde vive todo el sistema): se perdían al terminar
+# el `podman-compose run`. Con "${LFS_SYSROOT}/usr" quedan en
+# /usr/lib/modules/<versión>, la ruta que usan kmod/udev con /lib -> usr/lib.
 step_modules() {
     cd "${KERNEL_SRC}"
-    log "instalando módulos en ${LFS}/lib/modules"
+    log "instalando módulos en ${LFS_SYSROOT}/usr/lib/modules"
     # shellcheck disable=SC2086
-    make ARCH=x86_64 CROSS_COMPILE="${LFS_TGT}-" INSTALL_MOD_PATH="${LFS}" ${MAKEFLAGS} modules_install
+    make ARCH=x86_64 CROSS_COMPILE="${LFS_TGT}-" INSTALL_MOD_PATH="${LFS_SYSROOT}/usr" ${MAKEFLAGS} modules_install
 }
 
 step_verify() {
@@ -151,7 +176,7 @@ main() {
             step_build
             step_modules
             step_verify
-            log "Fase 1 completa: kernel endurecido en ${LFS}/boot, módulos en ${LFS}/lib/modules"
+            log "Fase 1 completa: kernel endurecido en ${LFS}/boot, módulos en ${LFS_SYSROOT}/usr/lib/modules"
             ;;
         *)
             die "target desconocido: ${target} (usar: extract|configure|build|modules|verify|all)"

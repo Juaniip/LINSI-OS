@@ -175,6 +175,12 @@ RUN find /etc/apt -type f \( -name 'sources.list' -o -name '*.sources' \) \
 #      type="" y el qdbusxml2cpp de plasma-desktop lo rechazó ("Invalid
 #      D-Bus type signature ''"). Sólo la librería de runtime, nativa del
 #      contenedor -- nada que ver con el dbus cruzado del sysroot.
+#   16) nasm (agregado 2026-10-27, Fase 6 Parte 3, FFmpeg -- dependencia
+#      obligatoria de kpipewire): el ensamblador x86 de FFmpeg. Corre en el
+#      contenedor y genera código para el target (x86_64 en los dos lados);
+#      no es una dependencia del sysroot. Sin él la única salida es
+#      --disable-x86asm, que deja afuera todo el SIMD escrito a mano de
+#      libavcodec/libswscale (decodificar y escalar varias veces más lento).
 # ------------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -206,6 +212,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-lxml \
         xsltproc \
         libdbus-1-3 \
+        nasm \
     && rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -314,6 +321,27 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
         --profile minimal \
         --default-toolchain stable \
     && rm -rf "${HOME}/.rustup/tmp" "${HOME}/.rustup/downloads"
+
+# ------------------------------------------------------------------------------
+# Fase 8 -- imagen booteable (agregado 2026-10-27). Va al final, en una capa
+# propia, para no invalidar la caché de todo lo anterior (rustup incluido):
+#   - btrfs-progs: mkfs.btrfs --rootdir arma el filesystem raíz directo desde
+#     un directorio, sin montar nada (no hay loop devices en podman rootless).
+#   - fdisk: trae sfdisk, que particiona el ARCHIVO de imagen (GPT).
+#   - qemu-system-x86 + ovmf (firmware UEFI) + qemu-utils: arrancar la imagen
+#     de prueba sin hardware real y convertirla a VHDX/VDI para Hyper-V o
+#     VirtualBox.
+# mtools/dosfstools (partición EFI) y grub-efi-amd64-bin ya estaban más arriba.
+# ------------------------------------------------------------------------------
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        btrfs-progs \
+        fdisk \
+        qemu-system-x86 \
+        qemu-utils \
+        ovmf \
+    && rm -rf /var/lib/apt/lists/*
+USER linsi
 
 # LFS = raíz del "taller". LFS_TGT = triplet del cross-compiler propio de
 # LINSI-OS (permite distinguirlo de un GCC del host en cualquier `file`/`gcc -v`).

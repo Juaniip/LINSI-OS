@@ -447,7 +447,13 @@ step_verify_pam_u2f() {
 # 7) pam-config — NO compila nada: deja la cadena de autenticación real en el
 # sysroot. pam_faillock en modo "deny=5 unlock_time=900" (bloquea 15 min tras
 # 5 intentos fallidos, contadores en /var/run/faillock vía faillock.conf) +
-# pam_u2f (token físico FIDO2/U2F obligatorio) + pam_unix con obscure+minlen=12
+# pam_u2f (token físico FIDO2/U2F) + pam_unix con obscure+minlen=12
+# CAMBIO 2026-10-27 (Fase 8, primera imagen booteable): pam_u2f con
+# "nouserok". Sin eso, un usuario sin llave registrada en
+# ~/.config/Yubico/u2f_keys no puede entrar de ninguna forma -- y para
+# registrar la llave (pamu2fcfg) hay que haber entrado antes: nadie podía
+# iniciar sesión en la imagen. Con nouserok, quien TIENE llave registrada la
+# sigue necesitando; quien no, entra con contraseña.
 # como piso mínimo de entropía (ver nota al principio del archivo sobre por
 # qué no hay pam_pwquality acá). El layout de archivo es "common-auth" al
 # estilo Debian (un solo archivo incluido por login/sshd/sudo/etc., no un
@@ -466,7 +472,7 @@ step_pam_config() {
 #   3. pam_unix: contraseña (obscure+minlen=12 se define en /etc/pam.d/common-password).
 #   4. pam_faillock (authfail/authsucc): cuenta el intento fallido o limpia el contador.
 auth    required                        pam_faillock.so preauth silent deny=5 unlock_time=900
-auth    required                        pam_u2f.so cue
+auth    required                        pam_u2f.so cue nouserok
 auth    [success=1 default=bad]         pam_unix.so try_first_pass
 auth    [default=die]                   pam_faillock.so authfail deny=5 unlock_time=900
 auth    sufficient                      pam_faillock.so authsucc
@@ -487,10 +493,152 @@ password requisite  pam_unix.so obscure minlen=12 sha512
 password required   pam_permit.so
 EOF
 
+    # pam_systemd (agregado 2026-10-27, Fase 8): registra la sesión en
+    # systemd-logind. Sin eso no hay "seat": kwin_wayland no puede pedirle a
+    # logind la GPU ni los dispositivos de entrada, y no arranca user@.service
+    # (PipeWire, etc.). Los archivos de plasma-login-manager (configuración
+    # "debian") incluyen common-session y dan esto por hecho.
     cat > "${pamd_dir}/common-session" <<'EOF'
-# LINSI-OS · Fase 4
+# LINSI-OS · Fase 4 (pam_systemd: Fase 8)
 session required    pam_unix.so
 session required    pam_limits.so
+session optional    pam_systemd.so
+EOF
+
+    # Lo incluye /usr/lib/pam.d/polkit-1 (convención Debian) y no existía:
+    # toda autorización de polkit (run0, acciones de administrador de KDE)
+    # fallaba. Igual que common-session pero sin pam_systemd (no es un login).
+    cat > "${pamd_dir}/common-session-noninteractive" <<'EOF'
+# LINSI-OS · Fase 8
+session required    pam_unix.so
+session required    pam_limits.so
+EOF
+
+    # Servicio "other": lo usa PAM para cualquier servicio sin archivo
+    # propio. Denegar todo es el default seguro.
+    cat > "${pamd_dir}/other" <<'EOF'
+# LINSI-OS · Fase 8 -- servicio sin configuración propia: se deniega.
+auth     required pam_deny.so
+account  required pam_deny.so
+password required pam_deny.so
+session  required pam_deny.so
+EOF
+
+    # SINTAXIS (error real 2026-10-27, primer arranque en QEMU): "@include
+    # archivo" es un PARCHE DE DEBIAN a Linux-PAM; el Linux-PAM original que
+    # compilamos lo rechaza ("illegal module type: @include") y el servicio
+    # entero queda inutilizable -- la pantalla de login daba "Permiso
+    # denegado" sin pedir nada. Lo original es "<tipo> include <archivo>",
+    # una línea por tipo (cada common-* tiene sólo su propio tipo).
+    #
+    # Servicios de util-linux (login/su/runuser/chsh/chfn) y shadow
+    # (passwd/chpasswd/newusers).
+    cat > "${pamd_dir}/login" <<'EOF'
+# LINSI-OS · Fase 8 -- login en consola (util-linux)
+auth       requisite  pam_nologin.so
+auth       include    common-auth
+account    include    common-account
+session    required   pam_loginuid.so
+session    optional   pam_keyinit.so force revoke
+session    include    common-session
+session    optional   pam_env.so readenv=1
+password   include    common-password
+EOF
+    cat > "${pamd_dir}/su" <<'EOF'
+# LINSI-OS · Fase 8 -- su: root entra sin contraseña; el resto, sólo el
+# grupo wheel (pam_wheel) y con autenticación completa.
+auth       sufficient pam_rootok.so
+auth       required   pam_wheel.so use_uid
+auth       include    common-auth
+account    include    common-account
+session    include    common-session
+EOF
+    cp "${pamd_dir}/su" "${pamd_dir}/su-l"
+    cat > "${pamd_dir}/runuser" <<'EOF'
+# LINSI-OS · Fase 8 -- runuser: sólo root.
+auth       sufficient pam_rootok.so
+session    optional   pam_keyinit.so revoke
+session    required   pam_limits.so
+session    required   pam_unix.so
+EOF
+    cp "${pamd_dir}/runuser" "${pamd_dir}/runuser-l"
+    cat > "${pamd_dir}/passwd" <<'EOF'
+# LINSI-OS · Fase 8 -- passwd (shadow)
+password   include    common-password
+EOF
+    local svc
+    for svc in chpasswd newusers; do
+        cat > "${pamd_dir}/${svc}" <<'EOF'
+# LINSI-OS · Fase 8 -- herramienta de root (shadow)
+password   include    common-password
+EOF
+    done
+    for svc in chsh chfn; do
+        cat > "${pamd_dir}/${svc}" <<'EOF'
+# LINSI-OS · Fase 8 -- chsh/chfn (util-linux): root sin contraseña.
+auth       sufficient pam_rootok.so
+auth       include    common-auth
+account    include    common-account
+session    include    common-session
+EOF
+    done
+
+    # Los que instalaron plasma-login-manager (PAM_OS_CONFIGURATION=debian) y
+    # polkit en /usr/lib/pam.d usan "@include": se reemplazan con la misma
+    # lógica en /etc/pam.d, que tiene prioridad. Las líneas "-auth ...
+    # pam_kwallet5/pam_gnome_keyring" se omiten: esos módulos no existen.
+    cat > "${pamd_dir}/plasmalogin" <<'EOF'
+# LINSI-OS · Fase 8 -- inicio de sesión gráfico (plasma-login-manager)
+auth       requisite  pam_nologin.so
+auth       required   pam_succeed_if.so user != root quiet_success
+auth       include    common-auth
+account    include    common-account
+password   include    common-password
+session    [success=ok ignore=ignore module_unknown=ignore default=bad] pam_selinux.so close
+session    optional   pam_keyinit.so force revoke
+session    required   pam_limits.so
+session    required   pam_loginuid.so
+session    include    common-session
+session    [success=ok ignore=ignore module_unknown=ignore default=bad] pam_selinux.so open
+session    required   pam_env.so
+session    required   pam_env.so envfile=/etc/default/locale user_readenv=1
+EOF
+    cat > "${pamd_dir}/plasmalogin-autologin" <<'EOF'
+# LINSI-OS · Fase 8 -- inicio de sesión automático (plasma-login-manager)
+auth       requisite  pam_nologin.so
+auth       required   pam_permit.so
+account    include    common-account
+password   include    common-password
+session    [success=ok ignore=ignore module_unknown=ignore default=bad] pam_selinux.so close
+session    optional   pam_keyinit.so force revoke
+session    required   pam_limits.so
+session    required   pam_loginuid.so
+session    include    common-session
+session    [success=ok ignore=ignore module_unknown=ignore default=bad] pam_selinux.so open
+session    required   pam_env.so
+session    required   pam_env.so envfile=/etc/default/locale
+EOF
+    cat > "${pamd_dir}/plasmalogin-greeter" <<'EOF'
+# LINSI-OS · Fase 8 -- sesión del greeter (usuario plasmalogin, sin contraseña)
+auth       required   pam_permit.so
+account    include    common-account
+password   required   pam_deny.so
+session    [success=ok ignore=ignore module_unknown=ignore default=bad] pam_selinux.so close
+session    optional   pam_keyinit.so force revoke
+session    required   pam_limits.so
+session    required   pam_loginuid.so
+session    include    common-session
+session    [success=ok ignore=ignore module_unknown=ignore default=bad] pam_selinux.so open
+session    required   pam_env.so
+session    required   pam_env.so envfile=/etc/default/locale
+EOF
+    cat > "${pamd_dir}/polkit-1" <<'EOF'
+# LINSI-OS · Fase 8 -- autorizaciones de polkit (run0, acciones de administrador)
+auth       include    common-auth
+account    include    common-account
+password   include    common-password
+session    required   pam_env.so readenv=1 user_readenv=0
+session    include    common-session-noninteractive
 EOF
 
     local security_dir="${LFS_SYSROOT}/etc/security"
@@ -520,6 +668,26 @@ step_verify_pam_config() {
     [[ "${ok}" -eq 1 ]] || die "falta algo de la configuración de PAM en el sysroot"
     grep -q "pam_faillock.so" "${LFS_SYSROOT}/etc/pam.d/common-auth" || die "common-auth no tiene pam_faillock.so"
     grep -q "pam_u2f.so" "${LFS_SYSROOT}/etc/pam.d/common-auth" || die "common-auth no tiene pam_u2f.so"
+    grep -q "pam_systemd.so" "${LFS_SYSROOT}/etc/pam.d/common-session" || die "common-session no tiene pam_systemd.so"
+    for p in common-session-noninteractive other login su passwd chpasswd plasmalogin plasmalogin-greeter polkit-1; do
+        [[ -f "${LFS_SYSROOT}/etc/pam.d/${p}" ]] || die "falta /etc/pam.d/${p}"
+        echo "  [OK] ${LFS_SYSROOT}/etc/pam.d/${p}"
+    done
+    # "@include" es sintaxis de Debian que Linux-PAM original rechaza: no
+    # puede quedar en ningún servicio que gane (/etc/pam.d, o /usr/lib/pam.d
+    # sin reemplazo en /etc/pam.d).
+    local f bad=0
+    for f in "${LFS_SYSROOT}"/etc/pam.d/* "${LFS_SYSROOT}"/usr/lib/pam.d/*; do
+        [[ -f "${f}" ]] || continue
+        if [[ "${f}" == "${LFS_SYSROOT}/usr/lib/pam.d/"* && -f "${LFS_SYSROOT}/etc/pam.d/$(basename "${f}")" ]]; then
+            continue
+        fi
+        if grep -q '^[[:space:]]*@include' "${f}"; then
+            echo "  [MAL] ${f} usa @include (sintaxis de Debian)"; bad=1
+        fi
+    done
+    [[ "${bad}" -eq 0 ]] || die "hay servicios PAM con @include, que Linux-PAM original no entiende"
+    echo "  [OK] ningún servicio PAM efectivo usa @include"
     log "OK: cadena de PAM configurada en el sysroot."
 }
 
@@ -572,7 +740,8 @@ step_systemd_rebuild() {
         -Dselinux=enabled \
         -Dlibcryptsetup=enabled \
         -Ddns-over-tls=openssl \
-        -Dlibfido2=enabled
+        -Dlibfido2=enabled \
+        -Dkmod=enabled
 
     ninja -C "${bdir}" ${MAKEFLAGS}
     DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
@@ -594,16 +763,271 @@ step_verify_systemd_rebuild() {
     [[ -e "${bin}" ]] || die "no está ${bin}"
     [[ -e "${shared}" ]] || die "no está ${shared}"
     file "${bin}"
-    local needed
-    needed="$("${LFS_TOOLS}/bin/${LFS_TGT}-readelf" -d "${shared}" | grep -i "needed")"
-    echo "${needed}"
+    # CORREGIDO 2026-10-27: este control buscaba las librerías como NEEDED de
+    # libsystemd-shared. La recompilación real de hoy (mismas opciones, todas
+    # "enabled" en el resumen de meson) deja como NEEDED sólo libc y el
+    # loader: systemd 261 carga PAM/SELinux/cryptsetup/FIDO2/OpenSSL/kmod
+    # con dlopen() y las declara en notas ELF ".note.dlopen" (FDO). Lo que
+    # se controla es que el soname de cada una esté compilado adentro.
+    # strings se lee UNA vez a una variable: "strings | grep -q" con
+    # pipefail falla aunque encuentre (grep -q corta, strings muere por
+    # SIGPIPE) -- mismo bug ya documentado con "| head -n1".
     local ok=1
-    local lib
-    for lib in libpam.so libselinux.so libcryptsetup.so libfido2.so libssl.so; do
-        echo "${needed}" | grep -q "${lib}" || { echo "  [FALTA] ${lib} no aparece como NEEDED de libsystemd-shared"; ok=0; }
+    local soname strs
+    strs="$(strings "${shared}")"
+    for soname in libpam.so.0 libselinux.so.1 libcryptsetup.so.12 libfido2.so.1 libssl.so.3 libkmod.so.2; do
+        if grep -qx "${soname}" <<<"${strs}"; then
+            echo "  [OK] ${soname} (dlopen)"
+        else
+            echo "  [FALTA] ${soname} no aparece en libsystemd-shared"; ok=0
+        fi
     done
-    [[ "${ok}" -eq 1 ]] || die "systemd se recompiló sin alguna de las features de Fase 4 -- revisá el resumen 'enabled/disabled features' que imprime meson setup, más arriba en este mismo log"
-    log "OK: systemd recompilado con PAM/SELinux/libcryptsetup/libfido2/OpenSSL enlazados."
+    [[ "${ok}" -eq 1 ]] || die "systemd se recompiló sin alguna de sus features (sin kmod, udev no carga módulos) -- revisá el resumen 'enabled/disabled features' que imprime meson setup, más arriba en este mismo log"
+    log "OK: systemd recompilado con PAM/SELinux/libcryptsetup/libfido2/OpenSSL/kmod."
+}
+
+# ------------------------------------------------------------------------------
+# kmod (agregado 2026-10-27, Fase 8) -- libkmod + depmod/modprobe/lsmod.
+# Bug real encontrado al preparar la primera imagen booteable: systemd se
+# había compilado sin kmod (no existía en el sysroot y Meson apagó la opción
+# en silencio), así que udev NO cargaba ningún módulo del kernel -- amdgpu e
+# iwlwifi van como módulo justamente porque piden firmware. Va antes de
+# systemd-rebuild, que ahora exige -Dkmod=enabled. moduledir explícito en
+# /usr/lib/modules (el default es /lib/modules; con /lib -> usr/lib es lo
+# mismo, pero así no depende del symlink). Sin manpages (piden scdoc) ni
+# completions de shell.
+# ------------------------------------------------------------------------------
+step_kmod() {
+    require_toolchain
+    log "kmod ${KMOD_VERSION} para ${LFS_TGT} — Meson+Ninja"
+
+    cd "${LFS_SOURCES}"
+    fetch "${KMOD_MIRROR}/kmod-${KMOD_VERSION}.tar.xz" "kmod-${KMOD_VERSION}.tar.xz"
+    log_sha256 "${LFS_SOURCES}/kmod-${KMOD_VERSION}.tar.xz"
+    extract_once "${LFS_SOURCES}/kmod-${KMOD_VERSION}.tar.xz" \
+                 "${LFS_BUILD}/.extracted-kmod-${KMOD_VERSION}"
+
+    local src="${LFS_BUILD}/kmod-${KMOD_VERSION}"
+    local crossfile="${LFS_BUILD}/meson-cross-linsi.ini"
+    write_meson_crossfile "${crossfile}"
+
+    local bdir="${src}/build"
+    rm -rf "${bdir}"
+
+    meson setup "${bdir}" "${src}" \
+        --cross-file="${crossfile}" \
+        --prefix=/usr \
+        --libdir=lib \
+        --sysconfdir=/etc \
+        --buildtype=release \
+        -Dmoduledir=/usr/lib/modules \
+        -Dzstd=enabled \
+        -Dxz=enabled \
+        -Dzlib=enabled \
+        -Dopenssl=enabled \
+        -Dtools=true \
+        -Dmanpages=false \
+        -Ddocs=false \
+        -Dbashcompletiondir=no \
+        -Dfishcompletiondir=no \
+        -Dzshcompletiondir=no
+
+    ninja -C "${bdir}" ${MAKEFLAGS}
+    DESTDIR="${LFS_SYSROOT}" ninja -C "${bdir}" install
+
+    log "kmod instalado en ${LFS_SYSROOT}/usr"
+}
+
+step_verify_kmod() {
+    log "Verificación: libkmod + depmod/modprobe en el sysroot"
+    local p
+    for p in "${LFS_SYSROOT}/usr/lib/libkmod.so.2" "${LFS_SYSROOT}/usr/lib/pkgconfig/libkmod.pc"; do
+        [[ -e "${p}" ]] || die "falta ${p}"
+        echo "  [OK] ${p}"
+    done
+    local t
+    for t in depmod modprobe; do
+        p="$(find "${LFS_SYSROOT}/usr/bin" "${LFS_SYSROOT}/usr/sbin" -name "${t}" -print -quit 2>/dev/null)"
+        [[ -n "${p}" ]] || die "falta ${t} en ${LFS_SYSROOT}/usr/{bin,sbin}"
+        echo "  [OK] ${p}"
+    done
+    log "OK: kmod completo en el sysroot."
+}
+
+# ------------------------------------------------------------------------------
+# shadow (agregado 2026-10-27, Fase 8) -- passwd, useradd/usermod/groupadd,
+# chpasswd, chage, gpasswd, newgrp y newuidmap/newgidmap (Podman rootless de
+# Fase 7). No había NINGUNA herramienta para crear usuarios ni cambiar una
+# contraseña. Reparto igual que Arch: login/su/nologin/chsh/chfn salen de
+# util-linux (step_util_linux_pam), así que acá se borran los de shadow.
+#   --with-libpam: passwd/chpasswd pasan por PAM (pam_unix + common-password).
+#   --without-selinux: necesitaría libsemanage, que no está; SELinux todavía
+#     no tiene política cargada (Fase 3 dejó kernel + libselinux).
+#   --without-libbsd/tcb/sssd/btrfs/audit/acl/attr: dependencias opcionales
+#     que no están en el sysroot o no hacen falta.
+#   --disable-account-tools-setuid: useradd & cía. sólo los usa root; sin
+#     setuid no necesitan servicio PAM propio.
+# Los bits setuid (passwd, chage, gpasswd, newgrp, newuidmap...) y los
+# dueños los fija build-image.sh: acá se instala como usuario sin privilegios.
+# ------------------------------------------------------------------------------
+step_shadow() {
+    require_toolchain
+    log "shadow ${SHADOW_VERSION} para ${LFS_TGT} — Autotools"
+
+    cd "${LFS_SOURCES}"
+    fetch "${SHADOW_MIRROR}/shadow-${SHADOW_VERSION}.tar.xz" "shadow-${SHADOW_VERSION}.tar.xz"
+    log_sha256 "${LFS_SOURCES}/shadow-${SHADOW_VERSION}.tar.xz"
+    extract_once "${LFS_SOURCES}/shadow-${SHADOW_VERSION}.tar.xz" \
+                 "${LFS_BUILD}/.extracted-shadow-${SHADOW_VERSION}"
+
+    local src="${LFS_BUILD}/shadow-${SHADOW_VERSION}"
+    local bdir="${src}/build"
+    rm -rf "${bdir}"
+    mkdir -p "${bdir}"
+    cd "${bdir}"
+
+    PKG_CONFIG_LIBDIR="${LFS_SYSROOT}/usr/lib/pkgconfig:${LFS_SYSROOT}/usr/share/pkgconfig" \
+    PKG_CONFIG_SYSROOT_DIR="${LFS_SYSROOT}" \
+    ../configure \
+        --host="${LFS_TGT}" \
+        --build="$(build_triplet)" \
+        --prefix=/usr \
+        --bindir=/usr/bin \
+        --sbindir=/usr/sbin \
+        --libdir=/usr/lib \
+        --sysconfdir=/etc \
+        --disable-static \
+        --disable-account-tools-setuid \
+        --enable-subordinate-ids \
+        --with-libpam \
+        --without-selinux \
+        --without-libbsd \
+        --without-tcb \
+        --without-sssd \
+        --without-btrfs \
+        --without-audit \
+        --without-acl \
+        --without-attr \
+        --without-su \
+        --with-yescrypt \
+        --with-group-name-max-length=32
+
+    make ${MAKEFLAGS}
+    make DESTDIR="${LFS_SYSROOT}" install
+
+    # Los que pone util-linux (step_util_linux_pam).
+    local f
+    for f in login nologin chsh chfn su; do
+        rm -f "${LFS_SYSROOT}/usr/bin/${f}" "${LFS_SYSROOT}/usr/sbin/${f}"
+    done
+    find "${LFS_SYSROOT}/usr/lib" -maxdepth 1 -name 'libsubid*.la' -delete 2>/dev/null || true
+
+    # login.defs: mismo algoritmo que pam_unix en common-password (sha512)
+    # para que useradd/chpasswd y passwd generen el mismo tipo de hash.
+    local defs="${LFS_SYSROOT}/etc/login.defs"
+    if [[ -f "${defs}" ]]; then
+        sed -i -E 's/^#?\s*ENCRYPT_METHOD\s.*/ENCRYPT_METHOD SHA512/' "${defs}"
+        grep -q '^ENCRYPT_METHOD SHA512$' "${defs}" || echo 'ENCRYPT_METHOD SHA512' >> "${defs}"
+    fi
+
+    log "shadow instalado en ${LFS_SYSROOT}/usr"
+}
+
+step_verify_shadow() {
+    log "Verificación: passwd/useradd/chpasswd/newuidmap en el sysroot"
+    local t p
+    for t in passwd useradd usermod groupadd chpasswd newuidmap newgidmap; do
+        p="$(find "${LFS_SYSROOT}/usr/bin" "${LFS_SYSROOT}/usr/sbin" -name "${t}" -print -quit 2>/dev/null)"
+        [[ -n "${p}" ]] || die "falta ${t}"
+        echo "  [OK] ${p}"
+    done
+    [[ -f "${LFS_SYSROOT}/etc/login.defs" ]] || die "falta ${LFS_SYSROOT}/etc/login.defs"
+    echo "  [OK] ${LFS_SYSROOT}/etc/login.defs ($(grep '^ENCRYPT_METHOD' "${LFS_SYSROOT}/etc/login.defs"))"
+    log "OK: shadow completo en el sysroot."
+}
+
+# ------------------------------------------------------------------------------
+# util-linux con PAM (agregado 2026-10-27, Fase 8) -- RECOMPILA el mismo
+# util-linux de Fase 2 (build-userspace.sh), que se compiló con
+# --disable-login/su/nologin/chfn-chsh/runuser/setpriv porque PAM no existía
+# todavía (receta de LFS). Sin esto no había `login`: agetty en la consola
+# no tenía a quién pasarle la sesión. Mismo esquema que systemd-rebuild:
+# build-dir separado, misma versión. El chgrp/chown de mentira es el mismo
+# truco de step_util_linux (los install-hooks quieren ser root); los dueños y
+# setuid reales los fija build-image.sh.
+# ------------------------------------------------------------------------------
+step_util_linux_pam() {
+    require_toolchain
+    [[ -e "${LFS_SYSROOT}/usr/lib/libpam.so" ]] || die "falta Linux-PAM -- corré primero: scripts/build-comms.sh linux-pam"
+    log "util-linux ${UTIL_LINUX_VERSION} con PAM (login/su/nologin/chsh/chfn/runuser/setpriv)"
+
+    cd "${LFS_SOURCES}"
+    fetch "${UTIL_LINUX_MIRROR}/util-linux-${UTIL_LINUX_VERSION}.tar.xz" \
+          "util-linux-${UTIL_LINUX_VERSION}.tar.xz"
+    extract_once "${LFS_SOURCES}/util-linux-${UTIL_LINUX_VERSION}.tar.xz" \
+                 "${LFS_BUILD}/.extracted-util-linux"
+
+    local src="${LFS_BUILD}/util-linux-${UTIL_LINUX_VERSION}"
+    local bdir="${src}/build-pam"
+    rm -rf "${bdir}"
+    mkdir -p "${bdir}"
+    cd "${bdir}"
+
+    # NCURSESW6_CONFIG (error real 2026-10-27: "cannot find -ltinfo" al
+    # linkear `ul`): ncurses ahora existe en el sysroot (en Fase 2 todavía
+    # no), y configure encontraba el ncursesw6-config de DEBIAN en
+    # /usr/bin -- que dice "-lncursesw -ltinfo" -- antes que el del sysroot
+    # (env.sh agrega ${LFS_SYSROOT}/usr/bin al FINAL del PATH). El del
+    # sysroot es un script de shell, corre en el contenedor y dice
+    # "-lncursesw" (nuestro ncurses no separa libtinfo).
+    NCURSESW6_CONFIG="${LFS_SYSROOT}/usr/bin/ncursesw6-config" \
+    ../configure \
+        --host="${LFS_TGT}" \
+        --build="$(build_triplet)" \
+        --prefix=/usr \
+        --bindir=/usr/bin \
+        --libdir=/usr/lib \
+        --runstatedir=/run \
+        --sbindir=/usr/sbin \
+        --disable-pylibmount \
+        --disable-liblastlog2 \
+        --disable-static \
+        --without-python \
+        --without-systemd \
+        --without-systemdsystemunitdir \
+        --without-tinfo \
+        ADJTIME_PATH=/var/lib/hwclock/adjtime \
+        --docdir=/usr/share/doc/util-linux-${UTIL_LINUX_VERSION}
+
+    make ${MAKEFLAGS}
+
+    local fakebin
+    fakebin="$(mktemp -d)"
+    printf '#!/bin/sh\nexit 0\n' > "${fakebin}/chgrp"
+    printf '#!/bin/sh\nexit 0\n' > "${fakebin}/chown"
+    chmod +x "${fakebin}/chgrp" "${fakebin}/chown"
+    PATH="${fakebin}:${PATH}" make DESTDIR="${LFS_SYSROOT}" install
+    rm -rf "${fakebin}"
+
+    find "${LFS_SYSROOT}/usr/lib" -maxdepth 1 -name '*.la' \
+        \( -name 'libmount*' -o -name 'libblkid*' -o -name 'libuuid*' -o -name 'libsmartcols*' -o -name 'libfdisk*' \) \
+        -delete 2>/dev/null || true
+
+    log "util-linux con PAM instalado en ${LFS_SYSROOT}/usr"
+}
+
+step_verify_util_linux_pam() {
+    log "Verificación: login/su/nologin/chsh de util-linux en el sysroot"
+    local t p
+    for t in login su nologin chsh chfn runuser sulogin; do
+        p="$(find "${LFS_SYSROOT}/usr/bin" "${LFS_SYSROOT}/usr/sbin" -name "${t}" -print -quit 2>/dev/null)"
+        [[ -n "${p}" ]] || die "falta ${t}"
+        echo "  [OK] ${p}"
+    done
+    "${LFS_TOOLS}/bin/${LFS_TGT}-readelf" -d "$(find "${LFS_SYSROOT}/usr/bin" -name login -print -quit)" \
+        | grep -q 'libpam.so' || die "login no está linkeado contra libpam"
+    echo "  [OK] login linkeado contra libpam"
+    log "OK: util-linux con PAM completo en el sysroot."
 }
 
 # ------------------------------------------------------------------------------
@@ -670,6 +1094,12 @@ main() {
         verify-pam-u2f)          step_verify_pam_u2f ;;
         pam-config)              step_pam_config ;;
         verify-pam-config)       step_verify_pam_config ;;
+        kmod)                    step_kmod ;;
+        verify-kmod)             step_verify_kmod ;;
+        shadow)                  step_shadow ;;
+        verify-shadow)           step_verify_shadow ;;
+        util-linux-pam)          step_util_linux_pam ;;
+        verify-util-linux-pam)   step_verify_util_linux_pam ;;
         systemd-rebuild)         step_systemd_rebuild ;;
         verify-systemd-rebuild)  step_verify_systemd_rebuild ;;
         network-config)          step_network_config ;;
@@ -689,6 +1119,12 @@ main() {
             step_verify_pam_u2f
             step_pam_config
             step_verify_pam_config
+            step_shadow
+            step_verify_shadow
+            step_util_linux_pam
+            step_verify_util_linux_pam
+            step_kmod
+            step_verify_kmod
             step_systemd_rebuild
             step_verify_systemd_rebuild
             step_network_config
@@ -696,7 +1132,7 @@ main() {
             log "Fase 4 ('Comunicaciones') completa: MAC aleatoria, DNS-over-TLS forzado y PAM con pam_faillock+FIDO2 listos en el sysroot."
             ;;
         *)
-            die "target desconocido: ${target} (usar: zlib|verify-zlib|openssl|verify-openssl|libcbor|verify-libcbor|libfido2|verify-libfido2|linux-pam|verify-linux-pam|pam-u2f|verify-pam-u2f|pam-config|verify-pam-config|systemd-rebuild|verify-systemd-rebuild|network-config|verify-network-config|all)"
+            die "target desconocido: ${target} (usar: zlib|verify-zlib|openssl|verify-openssl|libcbor|verify-libcbor|libfido2|verify-libfido2|linux-pam|verify-linux-pam|pam-u2f|verify-pam-u2f|pam-config|verify-pam-config|shadow|verify-shadow|util-linux-pam|verify-util-linux-pam|kmod|verify-kmod|systemd-rebuild|verify-systemd-rebuild|network-config|verify-network-config|all)"
             ;;
     esac
 }

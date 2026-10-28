@@ -58,6 +58,9 @@ services:
       # verla directo en Windows sin tener que copiar/pegar ni subir el log
       # a mano.
       - ./logs:/lfs/logs
+      # Imágenes booteables (Fase 8, 2026-10-27): build-image.sh deja acá el
+      # .img (y sus conversiones) para grabarlo al USB desde Windows.
+      - ./out:/lfs/out
 
     stdin_open: true
     tty: true

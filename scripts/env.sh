@@ -711,6 +711,18 @@ export CUPS_VERSION="2.4.20"
 export LIBCUPSFILTERS_VERSION="2.2.1"
 export LIBPPD_VERSION="2.1.1"
 export CUPS_FILTERS_VERSION="2.0.1"
+# Multimedia (2026-10-27): kpipewire pide FFmpeg (libavcodec/avformat/
+# avfilter/avutil/swscale) y libva/libva-drm sin condición (pkg_check_modules
+# REQUIRED en su CMakeLists.txt real). kpipewire es dependencia de runtime
+# (import QML org.kde.pipewire) del selector de pantalla de
+# xdg-desktop-portal-kde, de las miniaturas de la barra de tareas y del
+# indicador de cámara. Últimos releases reales: ffmpeg.org/releases/ y
+# github.com/intel/libva (API en vivo).
+export LIBVA_VERSION="2.24.1"
+export FFMPEG_VERSION="9.0.2"
+# KDE Gear (release-service) -- Konsole y Dolphin. 26.08.2 = último listado
+# en download.kde.org/stable/release-service/.
+export KDE_GEAR_VERSION="26.08.2"
 
 # libxcb (Tier 3, retrofit real 2026-09-04): libplasma v6.7.4 tiene un bug
 # real de upstream -- src/plasma/private/blureffectwatcher_p.h hace
@@ -1028,6 +1040,69 @@ export LIBPPD_MIRROR="https://github.com/OpenPrinting/libppd/releases/download/$
 export CUPS_FILTERS_MIRROR="https://github.com/OpenPrinting/cups-filters/releases/download/${CUPS_FILTERS_VERSION}"
 export BOOST_MIRROR="https://github.com/boostorg/boost/releases/download/boost-${BOOST_VERSION}"
 export MODEMMANAGER_MIRROR="https://gitlab.freedesktop.org/mobile-broadband/ModemManager/-/archive/${MODEMMANAGER_VERSION}"
+export LIBVA_MIRROR="https://github.com/intel/libva/releases/download/${LIBVA_VERSION}"
+export FFMPEG_MIRROR="https://ffmpeg.org/releases"
+export KDE_GEAR_MIRROR="https://download.kde.org/stable/release-service/${KDE_GEAR_VERSION}/src"
+# Mirror directo para todo lo de download.kde.org (ver _fetch_kde en
+# build-kde.sh): el redirector manda a un mirror caído. GWDG (Göttingen)
+# replica el árbol completo bajo /pub/linux/kde/ con la misma ruta.
+export KDE_FALLBACK_MIRROR="https://ftp.gwdg.de/pub/linux/kde"
+# Fuentes tipográficas (2026-10-27): el sysroot no tenía ninguna. Noto Sans
+# es la fuente de interfaz por defecto de plasma-integration; Hack Nerd Font
+# reemplaza a Hack (la monoespaciada por defecto) con los glifos de íconos.
+# Últimos releases reales en github.com/notofonts/latin-greek-cyrillic y
+# github.com/ryanoasis/nerd-fonts (API en vivo).
+export NOTO_SANS_VERSION="2.015"
+export NERD_FONTS_VERSION="3.5.1"
+export NOTO_SANS_MIRROR="https://github.com/notofonts/latin-greek-cyrillic/releases/download/NotoSans-v${NOTO_SANS_VERSION}"
+export NERD_FONTS_MIRROR="https://github.com/ryanoasis/nerd-fonts/releases/download/v${NERD_FONTS_VERSION}"
+# Layout de teclado por defecto del sistema (/etc/xdg/kxkbrc). latam =
+# "Spanish (Latin American)" de xkeyboard-config, el estándar en Argentina.
+export LINSI_KEYBOARD_LAYOUT="latam"
+
+# Fase 8 -- primera imagen booteable (2026-10-27). Últimos releases reales:
+# kernel.org/pub/linux/utils/kernel/kmod/, github.com/shadow-maint/shadow,
+# gitlab.freedesktop.org/xdg/shared-mime-info (API de releases),
+# data.iana.org/time-zones/releases/ y kernel.org/pub/linux/kernel/firmware/.
+# - kmod: systemd se había compilado SIN kmod (libkmod no existía), así que
+#   udev no podía cargar ningún módulo (amdgpu, iwlwifi...).
+# - shadow: passwd/useradd/chpasswd/newuidmap. login/su/nologin/chsh/chfn
+#   salen de util-linux (recompilado con PAM), como en Arch.
+# - shared-mime-info: sin la base MIME, KIO/Dolphin no reconocen ningún tipo
+#   de archivo.
+# - tzdata: no había /usr/share/zoneinfo; se compila con el zic del
+#   contenedor (formato TZif, no depende de la arquitectura).
+# - linux-firmware: sólo lo que piden los drivers que van como módulo o que
+#   lo necesitan para andar bien (amdgpu, i915, iwlwifi, rtl_nic,
+#   regulatory.db), no el árbol entero.
+export KMOD_VERSION="34.2"
+export SHADOW_VERSION="4.20.3"
+export SHARED_MIME_INFO_VERSION="2.5.1"
+export TZDATA_VERSION="2026e"
+export LINUX_FIRMWARE_VERSION="20261019"
+export KMOD_MIRROR="https://www.kernel.org/pub/linux/utils/kernel/kmod"
+export SHADOW_MIRROR="https://github.com/shadow-maint/shadow/releases/download/${SHADOW_VERSION}"
+export SHARED_MIME_INFO_MIRROR="https://gitlab.freedesktop.org/xdg/shared-mime-info/-/archive/${SHARED_MIME_INFO_VERSION}"
+export TZDATA_MIRROR="https://data.iana.org/time-zones/releases"
+export LINUX_FIRMWARE_MIRROR="https://www.kernel.org/pub/linux/kernel/firmware"
+# - kbd: loadkeys/setfont + mapas (la-latin1) para la consola; sin él
+#   systemd-vconsole-setup falla y systemd-firstboot frena el primer arranque
+#   preguntando el keymap.
+# - Certificados raíz: el bundle de Mozilla que publica curl.se (fechado, el
+#   último listado en curl.se/docs/caextract.html). No había ninguno, y
+#   systemd-resolved (DNS-over-TLS estricto) los necesita para resolver.
+export KBD_VERSION="2.10.0"
+export CACERT_DATE="2026-10-20"
+export KBD_MIRROR="https://www.kernel.org/pub/linux/utils/kbd"
+# wireless-regdb: regulatory.db (canales WiFi legales por país). Ya no viene
+# dentro de linux-firmware.
+export WIRELESS_REGDB_VERSION="2026.09.03"
+export WIRELESS_REGDB_MIRROR="https://www.kernel.org/pub/software/network/wireless-regdb"
+# iana-etc: /etc/services y /etc/protocols (glibc no los trae). Último
+# release real de github.com/Mic92/iana-etc.
+export IANA_ETC_VERSION="20261022"
+export IANA_ETC_MIRROR="https://github.com/Mic92/iana-etc/releases/download/${IANA_ETC_VERSION}"
+export CACERT_MIRROR="https://curl.se/ca"
 # libxcb y su cadena de dependencias: xorg.freedesktop.org, accesible en
 # vivo (a diferencia de gitlab.freedesktop.org) -- ver comentario real de
 # versión más arriba. Tres subdirectorios reales distintos del mismo
