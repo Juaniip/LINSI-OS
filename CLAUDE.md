@@ -45,13 +45,22 @@ filtros de OpenPrinting sin ghostscript + Qt con cups + print-manager +
 xdg-desktop-portal-kde). Qt quedó alineado con KDE también en el
 directorio de plugins (`lib/plugins`, 2026-10-27 — antes Qt no hubiera
 encontrado ningún plugin de KDE). Wayland puro sostenido (sin libX11, sin KCM
-de teclado — el layout va fijo en `/etc/skel`). Faltan Konsole/Dolphin,
-kpipewire, `/etc/skel` (layout, tema oscuro, Nerd Fonts). Nada se arrancó
-todavía en una máquina real ni en QEMU — **antes de eso, correr
-`scripts/check-sysroot.sh`**: el 2026-10-22 encontró que faltaba el
-runtime de C++ (libstdc++/libgcc_s/libgomp, ningún programa C++ hubiera
-arrancado) y rutas `/lfs` compiladas en libxkbcommon/kded/ki18n/LVM2; hoy
-da 0 problemas. **Fase 5 (infraestructura
+de teclado). Desde 2026-10-27 también: FFmpeg + libva, qtmultimedia con
+backend real (antes no tenía ninguno), kpipewire, Konsole y Dolphin (KDE
+Gear 26.08.2), fuentes (no había ninguna: Noto Sans + Hack Nerd Font) y
+defaults en `/etc/xdg` (Breeze oscuro, teclado `latam`/pc105). El escritorio
+está completo salvo dependencias opcionales (Baloo, etc.). **Fase 8 — primera
+imagen booteable (2026-10-27):** `scripts/build-image.sh` genera
+`out/linsi-os-AAAAMMDD.img` (GPT: ESP con GRUB + kernel, raíz btrfs; UEFI,
+Secure Boot apagado, sin initramfs). Probada en QEMU: arranca por UEFI hasta
+el login gráfico de plasma-login-manager. Falta probarla en hardware real.
+Para llegar ahí hubo que agregar kernel con drivers de hardware real, kmod,
+shadow, login/su, PAM corregido (`@include` es de Debian), tzdata, kbd,
+certificados CA, firmware y shared-mime-info, y arreglar un bug propio del
+parche de libplasma — todo en `docs/PENDIENTES.md`, sección "Fase 8".
+**Después de cualquier tanda de builds, correr `scripts/check-sysroot.sh`**:
+el 2026-10-22 encontró que faltaba el runtime de C++ y rutas `/lfs`
+compiladas en binarios. **Fase 5 (infraestructura
 autónoma) parcial:** parte (a) — apk-tools + firma — confirmada recién
 (2026-09-30, ver más abajo); partes (b) servidor de repo en la Raspberry
 Pi y (c) CI/CD siguen pendientes (ver `docs/PENDIENTES.md`). Fase 6 Parte

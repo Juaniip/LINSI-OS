@@ -3309,16 +3309,113 @@ la corrida — bash lee el script de a pedazos y, si las líneas se mueven,
 sigue desde un punto equivocado (`p_verify_systemsettings: command not
 found` al final del step de qtbase, que sí había instalado bien). No editar
 scripts con un build en curso.
-- **Otros pendientes del escritorio:** kpipewire (módulo QML
-  `org.kde.pipewire`, RUNTIME de plasma-desktop: miniaturas de ventanas en
-  el taskmanager bajo Wayland), layout de teclado fijo + tema oscuro + Nerd
-  Fonts en `/etc/skel`, Konsole y Dolphin (KDE Gear), y las dependencias
-  opcionales de la decisión "alcance: todo" (Baloo, PackageKitQt6,
-  AppStreamQt, KIOExtras/KIOFuse, libei, AccountsService,
-  QAccessibilityClient6, KExiv2Qt6, Union).
+- **Otros pendientes del escritorio:** cerrados el 2026-10-27 salvo las
+  dependencias opcionales — ver "Multimedia, aplicaciones base, fuentes y
+  configuración por defecto" abajo.
 - **Refactor sin cambio de comportamiento:** las reglas ITS de gettext para
   `.policy` de polkit (fix real de NetworkManager) pasaron a un helper,
   `install_polkit_its_rules()`, porque ModemManager necesita lo mismo.
+
+### Multimedia, aplicaciones base, fuentes y configuración por defecto (2026-10-27)
+
+**kpipewire es más que miniaturas.** `grep` en los fuentes ya compilados:
+el import QML `org.kde.pipewire` lo usan `PipeWireDelegate.qml` de
+xdg-desktop-portal-kde (el selector de pantalla/ventana al compartir
+pantalla en una videollamada), `PipeWireThumbnail.qml` del taskmanager y el
+applet `cameraindicator`. Ningún paquete lo pide en build (kwin sólo para
+tests), por eso no había fallado nada. Su `CMakeLists.txt` pide FFmpeg
+(avcodec/avformat/avfilter/avutil/swscale) y libva/libva-drm, todos
+REQUIRED, y no había ninguno.
+
+- **libva 2.24.1:** sólo libva + libva-drm. X11/GLX/Wayland en `no` (Wayland
+  puro; libva-wayland sólo sirve a reproductores que presentan superficies
+  VA directo).
+- **FFmpeg 9.0.2:** LGPL (sin `--enable-gpl`/`--enable-nonfree`),
+  `--disable-autodetect` (si no, prende solo lo que encuentre: xlib, xcb,
+  sdl2...) con pthreads/iconv/zlib/libdrm/vaapi prendidos a mano, sin
+  programas ni libavdevice. `--cross-prefix` sin ruta absoluta porque la
+  línea de configure queda grabada en libavutil. Necesitó **nasm** en el
+  contenedor (Dockerfile ítem 16): sin él, la única salida era
+  `--disable-x86asm`, que deja afuera todo el SIMD escrito a mano.
+- **qtmultimedia se había compilado SIN NINGÚN backend** (sólo para que
+  qtspeech tuviera el target): ninguna app Qt podía reproducir audio ni
+  video. Ahora va después de FFmpeg en `all` y fuerza `-DFEATURE_ffmpeg=ON`
+  (si FFmpeg falta, falla en vez de instalar otro Qt Multimedia mudo).
+  Resultado real (`config.summary`): audio por PipeWire y PulseAudio,
+  backend FFmpeg, VAAPI, V4L2 y captura de pantalla por PipeWire.
+- **kpipewire 6.7.4:** compiló sin cambios contra FFmpeg 9.
+- **Sin aceleración de video por hardware todavía:** Mesa se compiló con
+  `-Dgallium-va=disabled` porque no había libva. Ahora que existe, los
+  drivers VA de Mesa (radeonsi/nouveau) se pueden prender — pendiente,
+  implica recompilar Mesa. Sin driver, libva carga pero todo va por CPU
+  (grabar pantalla con kpipewire no tiene codificador: los únicos que hay
+  son `*_vaapi`, porque libx264/libvpx no se compilaron).
+
+**Konsole y Dolphin (KDE Gear 26.08.2).** Gear es otro tren de versiones;
+`_gear_cmake_build` reusa `_plasma_cmake_build` pisando
+`PLASMA_VERSION`/`PLASMA_MIRROR` con `local` (alcance dinámico de bash).
+Faltaban dos frameworks: **KPty** (Konsole) y **KFileMetaData** (Dolphin,
+`TYPE REQUIRED`).
+
+- **KPty:** `FindUTEMPTER.cmake` corta el configure en cross ("You must set
+  UTEMPTER_EXECUTABLE or CMAKE_DISABLE_FIND_PACKAGE_UTEMPTER when
+  cross-compiling"). utempter es OPTIONAL (sólo registra terminales en utmp,
+  lo que muestra `who`) y no está: `-DCMAKE_DISABLE_FIND_PACKAGE_UTEMPTER=ON`.
+- **Konsole:** `WITH_X11=OFF` (lo pasa ya `_plasma_cmake_build`) y
+  `WITH_LIBSSH=OFF` (libssh sólo sirve para que el plugin SSHManager lea
+  `~/.ssh/config`; el ssh en sí no lo usa). Compiló sin parches.
+- **Dolphin:** séptimo caso del bug sistémico de X11, el más simple:
+  `CMakeLists.txt` hace `set(HAVE_X11 TRUE)` en cualquier Unix, sin opción
+  ni `find_package` ("fatal error: KStartupInfo: No such file or
+  directory"). Todo su código X11 ya está detrás de `#if HAVE_X11` con la
+  rama Wayland al lado: `_patch_dolphin` sólo apaga el flag. Baloo (panel
+  de información, búsqueda) queda para los opcionales.
+
+**download.kde.org manda a un mirror caído.** Le pasó a print-manager
+(resuelto a mano) y otra vez a kpipewire: el redirector elige
+`linorg.usp.br` y wget se queda en "Connection timed out". Fix permanente
+en `fetch()` de `build-kde.sh` (`_fetch_kde`): el `.sha256` lo sirve
+download.kde.org directo, sin redirigir; el tarball se baja de
+`KDE_FALLBACK_MIRROR` (ftp.gwdg.de, misma ruta) y, si falla, del
+redirector; en los dos casos se controla contra ese sha256 oficial. Antes
+los tarballs de KDE no se verificaban contra nada.
+
+**El sysroot no tenía NINGUNA fuente tipográfica** (`/usr/share/fonts` no
+existía): Plasma hubiera arrancado sin poder dibujar texto.
+plasma-integration (`kfontsettingsdata.cpp`) usa por defecto "Noto Sans" 10
+y "Hack" 10.
+
+- **Noto Sans 2.015** (notofonts/latin-greek-cyrillic): sólo `hinted/ttf`,
+  72 archivos. La licencia viene como `OFL.txt` (no `LICENSE`: el primer
+  intento salió con el código 11 de unzip, "no matching files").
+- **Hack Nerd Font 3.5.1:** variantes "Hack Nerd Font" y "Hack Nerd Font
+  Mono" (íconos de una celda, la correcta para terminales).
+
+**Configuración por defecto: en `/etc/xdg`, no en `/etc/skel`.** KConfig
+lee `/etc/xdg` como capa de defaults, así que vale también para usuarios
+que ya existen, para el usuario del greeter y para cuentas que no se creen
+con `useradd`; `/etc/skel` sólo se copia al crear la cuenta. Cada usuario
+puede cambiarla desde Preferencias. Verificado contra los fuentes:
+
+- `kdeglobals` `[KDE] LookAndFeelPackage=org.kde.breezedark.desktop`:
+  `startplasma.cpp` (setupPlasmaEnvironment) carga ese paquete en el primer
+  inicio de sesión y vuelca sus defaults, esquema de colores incluido, en
+  `~/.config/kdedefaults`. `[General] font`/`fixed`: Noto Sans y Hack Nerd
+  Font Mono.
+- `kxkbrc` `[Layout] LayoutList=latam`, `Model=pc105`: kwin
+  (`src/xkb.cpp`, `loadKeymapFromConfig`) lee Model/LayoutList/VariantList;
+  su default es `pc104`, que no tiene la tecla `< >` de los teclados ISO
+  latinoamericanos. El layout sale de `LINSI_KEYBOARD_LAYOUT` en `env.sh`.
+- `/etc/fonts/local.conf`: alias `sans-serif` → Noto Sans y `monospace` →
+  Hack Nerd Font Mono, para apps que no leen `kdeglobals`.
+
+**Pendiente para Fase 8 relacionado:** el teclado de la consola (TTY,
+`/etc/vconsole.conf` `KEYMAP=la-latin1`) y el caché de fontconfig
+(`fc-cache` en el primer arranque; sin él funciona, pero más lento).
+→ Resueltos los dos en `build-image.sh` (kbd + `fc-cache` adentro del
+rootfs), ver "Fase 8 — primera imagen booteable".
+
+`check-sysroot.sh` después de todo esto: 2353 ELF, 0 problemas.
 
 ## Fase 6 — Parte 3 (Qt6 + KDE Frameworks/Plasma) — 🟡 núcleo compilado (2026-09-17), escritorio usable en curso (2026-10-22)
 
@@ -3604,6 +3701,191 @@ fase). Resumen por tier:
     profundidad — va a necesitar su propio research de opciones de build
     antes de escribir nada, mismo criterio que se usó para Mesa.
 
+## Fase 8 — primera imagen booteable (2026-10-27) — 🟡 imagen generada, falta probar en hardware real
+
+Pedido de Juani: "arma lo que falta, quiero llegar a casa y tener que
+únicamente preparar la usb o la iso para bootear". Resultado:
+`out/linsi-os-AAAAMMDD.img` (+ `.sha256`), una imagen de disco GPT para
+grabar en un pendrive (Rufus en modo DD, Etcher o `dd`) y arrancar por UEFI.
+No es todavía el instalador (Calamares sigue pendiente): es el sistema
+completo, escribible, corriendo desde el USB. Script nuevo:
+`scripts/build-image.sh` (`kbd`, `tzdata`, `cacert`, `firmware`, `rootfs`,
+`image`, `test`, cada uno con su `verify-`).
+
+### Diseño
+
+- **Disco:** ESP FAT32 de 512 MiB (`LINSI-ESP`: GRUB autónomo en
+  `EFI/BOOT/BOOTX64.EFI` + kernel en `/linsi/vmlinuz`) y raíz btrfs
+  (`linsi-root`, tipo "Linux root x86-64" de la Discoverable Partitions
+  Spec). La partición raíz es de 8 GiB y el btrfs se genera con el tamaño
+  mínimo; en el primer arranque `systemd-repart` agranda la partición hasta
+  ocupar el pendrive y `x-systemd.growfs` (fstab) agranda el btrfs.
+- **Sin initramfs:** lo necesario para llegar al raíz está compilado en el
+  kernel y el raíz se busca por `root=PARTLABEL=linsi-root`, que el kernel
+  resuelve solo.
+- **GRUB** (el `grub-efi-amd64-bin` que el Dockerfile ya traía): menú con
+  normal / modo texto / `nomodeset` / consola serie / firmware UEFI.
+  Kernel 7.2 con `EFI_HANDOVER_PROTOCOL=y`, que es lo que usa el GRUB 2.06
+  de Debian. **Secure Boot tiene que estar apagado** (nada firmado todavía).
+- **Rootfs como root sin salir del contenedor:** se copia el sysroot a
+  `/lfs/build/image/rootfs`, se hace `chown -R 0:0` con el `sudo` del
+  contenedor (podman rootless: es el usuario de Windows mapeado) y las
+  herramientas del propio sistema (`systemd-sysusers`, `useradd`,
+  `chpasswd -e`, `systemctl preset-all`, `depmod`, `localedef`,
+  `update-mime-database`, `fc-cache`) corren adentro con `chroot`, misma
+  arquitectura. `mkfs.btrfs --rootdir` arma el filesystem sin montar nada
+  (no hay loop devices en rootless).
+- **Usuario de prueba:** `linsi` (grupos wheel, audio, video, input,
+  render, lp, lpadmin; shell zsh) y root, contraseña `linsi`
+  (`LINSI_IMAGE_PASSWORD` la pisa). Administración con `run0` (systemd +
+  polkit, regla `unix-group:wheel`), no sudo.
+- **Config:** usrmerge (`/bin /sbin /lib /lib64` → `usr/`), `/bin/sh` →
+  zsh (no hay bash), `os-release`, fstab por PARTLABEL, `es_AR.UTF-8`,
+  hora de Buenos Aires, consola `la-latin1`, nsswitch con los módulos de
+  systemd, `resolv.conf` → stub de resolved, `machine-id` "uninitialized"
+  (cada pendrive genera el suyo), presets (NetworkManager, resolved,
+  timesyncd, plasmalogin, cups; networkd apagado) y `graphical.target`.
+
+### Lo que faltaba de verdad para arrancar (todos errores/huecos reales)
+
+1. **Kernel sin drivers para hardware real:** sin NVMe, sin framebuffer de
+   arranque (simpledrm), sin consola gráfica, sin amdgpu, sin códecs de
+   sonido, sin WiFi Intel, sin overlayfs. Fragmento nuevo
+   `scripts/kernel-hardware.config` (separado del de hardening). Lo que
+   pide firmware (amdgpu, iwlwifi) va como módulo firmado: compilado
+   adentro arranca antes que el raíz y no encuentra `/usr/lib/firmware`.
+2. **Los módulos nunca llegaron al sysroot:** `step_modules` usaba
+   `INSTALL_MOD_PATH=${LFS}` → `/lfs/lib/modules`, fuera de todo volumen.
+   Ahora `${LFS_SYSROOT}/usr` → `/usr/lib/modules/7.2.0`.
+3. **Dos opciones de hardening que nunca se aplicaron desde Fase 1:**
+   `merge_config.sh` sólo avisaba. `configure` ahora corta si algún valor
+   de los fragmentos no quedó en `.config`. Destapó:
+   `SYSTEM_REVOCATION_LIST` (dependía de `SYSTEM_BLACKLIST_KEYRING`, que no
+   estaba pedida — agregada) y `NFT_COUNTER` (ya no existe en 7.2: el
+   contador está integrado en nf_tables — sacada).
+4. **systemd sin kmod → udev no cargaba ningún módulo.** kmod 34.2 nuevo
+   (`build-comms.sh kmod`) y `-Dkmod=enabled` en `systemd-rebuild`. El
+   verify de systemd buscaba las librerías como NEEDED; systemd 261 las
+   carga con `dlopen()` (notas ELF `.note.dlopen`), así que ahora controla
+   los sonames compilados adentro.
+5. **No había `login`, `su`, `passwd` ni `useradd`.** util-linux se
+   recompila con PAM (`util-linux-pam`) y shadow 4.20.3 nuevo, reparto
+   como Arch (login/su/nologin/chsh/chfn de util-linux, el resto de
+   shadow). util-linux falló con "cannot find -ltinfo": tomaba el
+   `ncursesw6-config` de Debian (va antes en el PATH); se le pasa el del
+   sysroot.
+6. **PAM incompleto:** sin `pam_systemd` en `common-session` (sin sesión de
+   logind kwin no accede a la GPU ni al teclado), sin
+   `common-session-noninteractive` (lo incluye polkit: fallaba toda
+   autorización, run0 incluido), sin `other`, `login`, `su`, `passwd`,
+   `chpasswd`, `chsh`, `chfn`, `runuser`.
+7. **⚠️ DECISIÓN DE SEGURIDAD A REVISAR:** `common-auth` tenía
+   `pam_u2f.so` como `required` sin `nouserok`: nadie podía entrar sin una
+   llave FIDO2 registrada, y para registrarla hay que haber entrado antes.
+   Se agregó `nouserok`: con llave registrada la sigue exigiendo; sin
+   llave, entra con contraseña.
+8. **uutils sin chmod/chown/chgrp/chroot/`[`:** el default de su Cargo.toml
+   es sólo `feat_common_core`; las utilidades Unix están en `--features
+   unix`. Además los symlinks salían de una lista a mano; ahora de
+   `coreutils --list` (105).
+9. **Sin certificados CA:** resolved tiene DNS-over-TLS estricto y valida el
+   certificado del servidor → sin CA no resolvía nada. Bundle de Mozilla
+   (curl.se, 2026-10-20) en `/etc/ssl/certs/ca-certificates.crt` +
+   `/etc/ssl/cert.pem`.
+10. **Sin tzdata, sin kbd, sin shared-mime-info, sin `/etc/services`:**
+    tzdata 2026e (con el `zic` del contenedor; `tzdata.zi` no viene en el
+    tarball), kbd 2.10.0 (sin él systemd-firstboot frena el arranque
+    preguntando el keymap), shared-mime-info 2.5.1 (sin la base MIME
+    Dolphin no reconoce ningún archivo), iana-etc 20261022.
+11. **Firmware:** subconjunto de linux-firmware 20261019 (amdgpu, i915,
+    intel/iwlwifi + links, rtl_nic: 435 MB) instalado con su
+    `copy-firmware.sh`. `regulatory.db` ya no viene ahí: wireless-regdb
+    2026.09.03.
+
+### Lo que destapó el primer arranque real (QEMU, 2026-10-27)
+
+La imagen arranca: GRUB por UEFI (OVMF) → kernel → systemd → target
+gráfico en segundos. `build-image.sh test` la arranca dos veces (kernel
+directo con consola serie, y UEFI desde el disco) y saca capturas en `out/`.
+Para diagnosticar se usó `systemd.journald.forward_to_console=1` por consola
+serie. Encontrado, en orden:
+
+1. **`@include` en PAM es un parche de Debian.** El Linux-PAM original lo
+   rechaza ("illegal module type: @include") y el servicio entero queda
+   inutilizable: el greeter daba "Permiso denegado" sin pedir nada. Lo
+   usaban los archivos de plasma-login-manager (plantilla "debian"), el de
+   polkit (¡toda autorización de administrador!), el de CUPS (su configure
+   ve `common-auth` y elige la plantilla Debian) y los que se escribieron
+   hoy. Todo reescrito a `<tipo> include <archivo>`; los de
+   plasma-login-manager y polkit se reemplazan en `/etc/pam.d` (gana sobre
+   `/usr/lib/pam.d`). `verify-pam-config` ahora falla si algún servicio
+   efectivo usa `@include`.
+2. **libplasma: bug propio en el parche de X11 del 2026-09-04.** El parche
+   metía en `#if HAVE_X11` la creación del `BlurEffectWatcher` (sin X11 la
+   clase quedaba abstracta). Pero su constructor tiene también la rama
+   Wayland, y `theme_p.cpp:188` lo usa sin chequear: puntero nulo. kwin,
+   el greeter y el fondo de pantalla morían los tres con SEGV en
+   `Plasma::BlurEffectWatcher::isEffectActive()` (libPlasma.so+0x58a50,
+   resuelto con addr2line) → pantalla negra. Arreglo correcto: en el header,
+   sin X11, `nativeEventFilter` devuelve `false` (la clase deja de ser
+   abstracta) y la creación queda como en upstream.
+3. **audit sin configuración:** Fase 3 instaló audit cuando `/etc` no era
+   persistente; `auditd.conf` se perdió y no hay ningún `rules.d`. Se
+   reinstaló audit (ahora sí persiste) y `build-image.sh` agrega reglas
+   base (`/etc/audit/rules.d/10-linsi-base.rules`).
+4. **Sin initramfs, el raíz es `/dev/root`:** systemd-repart, growfs y
+   gpt-auto-generator no pueden saber qué disco hay detrás ("backed by
+   pseudo-device /dev/root") y fallaban en cada arranque. Sacados
+   (`systemd.gpt_auto=0` en la línea del kernel). Consecuencia: la raíz no
+   crece para ocupar el pendrive (queda para cuando haya initramfs).
+5. **btrfs:** el `mkfs.btrfs` 6.2 con `--rootdir` ignora `-b` y el tamaño
+   del archivo (pedido 8192 MiB → filesystem de 8685 MiB, `total_bytes` del
+   superbloque). Se invirtió el orden: primero el filesystem, después la
+   partición del tamaño real. `verify-image` lee `total_bytes` del
+   superbloque y controla que entre en su partición.
+
+6. **Resultado:** con todo lo anterior, por UEFI + GRUB llega a la pantalla
+   de login gráfica de plasma-login-manager (en español, hora de Buenos
+   Aires): `out/prueba-uefi-login.png`. Falsa alarma en el camino: con
+   `-cpu max` y sin KVM, kwin moría con SEGV dentro de llvmpipe (código JIT
+   que la emulación de QEMU no ejecuta bien); con `-cpu Nehalem` el mismo
+   disco anda. `build-image.sh test` usa Nehalem sin KVM. En hardware real
+   no se usa llvmpipe y en una VM con KVM/Hyper-V la CPU es la real.
+
+Pendientes que se vieron y no bloquean: RTKit no existe (PipeWire avisa,
+sin prioridad de tiempo real), sin archivo Compose de XKB para es_AR (falta
+`/usr/share/X11/locale`, las teclas muertas igual andan), `regulatory.db`
+se pide antes de montar el raíz (cfg80211 compilado adentro: se carga
+después), y `LSM: failed LSM lockdown core initcall with errno -19` — **a
+confirmar** en hardware real con `cat /sys/kernel/security/lockdown` que el
+lockdown quedó en `integrity`.
+
+### Errores del propio armado (resueltos)
+
+- `systemd-hwdb update` en chroot: "Function not implemented" (escribe vía
+  `/proc/self/fd`; no hay `/proc` y en rootless no se puede montar). Se
+  genera en el primer arranque (`systemd-hwdb-update.service`).
+- `chown root:messagebus` desde afuera resolvía con el `/etc/group` del
+  contenedor → los chown con nombre van por chroot.
+- `mkfs.btrfs --rootdir` (btrfs-progs 6.2) agrandó el archivo por encima
+  del tamaño pedido (imagen de 9198 MiB en vez de 8706, GPT de respaldo en
+  el medio) → `--shrink` + control de tamaño exacto en el verify.
+- Verifies propios: `strings | grep -q` con pipefail (SIGPIPE), `test -e`
+  sobre symlinks absolutos de systemd, `$` final de `$6$` como ancla.
+
+### Pendientes de Fase 8
+
+- **Probar en hardware real** (lab y casa): NVMe, GPU AMD/Intel/NVIDIA
+  (nouveau no está compilado), WiFi.
+- Arranque **BIOS/legacy** (sólo UEFI hoy) y **Secure Boot** (claves
+  propias + firma de GRUB/kernel, o UKI con systemd-boot).
+- **Calamares** (instalador) y snapshots btrfs (subvolúmenes `@`/`@home`).
+- Drivers VA de Mesa (`-Dgallium-va`), xdg-desktop-portal (frontend) y
+  fuse3 — sin el frontend del portal, compartir pantalla y los diálogos de
+  archivo de Flatpak no andan.
+- `ldconfig` no se instaló con glibc (se enmascara `ldconfig.service`).
+- DNS-over-TLS estricto: si una red bloquea el puerto 853, no hay DNS.
+
 ## Infraestructura de build
 
 - **BUG REAL CRÍTICO encontrado y corregido (2026-10-22): el sysroot no
@@ -3677,7 +3959,8 @@ fase). Resumen por tier:
   usr/lib`, `/bin -> usr/bin`, `/sbin -> usr/bin`) — sin `/lib64` no
   arranca NINGÚN binario dinámico. Lo mismo para `/etc/os-release`, que no
   existe en el sysroot (plasma-login-manager lo leía para elegir su
-  plantilla PAM).
+  plantilla PAM). → Resuelto en `build-image.sh` (2026-10-27): crea los
+  symlinks y `/usr/lib/os-release` en el rootfs de la imagen.
 
 - **BUG REAL GRAVE encontrado y resuelto (2026-09-30): `/lfs/etc` nunca tuvo
   volumen persistente — cualquier config real se perdía entre corridas
